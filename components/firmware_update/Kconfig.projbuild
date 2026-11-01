@@ -1,0 +1,8 @@
+menu "P1S Firmware Updates"
+config P1S_RELEASE_REPOSITORY
+    string "Public firmware release repository"
+    default "ahmaddawod12/P1S-HeatControl-Releases"
+    help
+        Public GitHub owner/repository containing signed firmware assets.
+        The controller never needs a GitHub access token.
+endmenu

@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "api_contract.c"
+        "sse_hub.c"
+        "web_server.c"
+        "firmware_api.c"
+        "firmware_api_policy.c"
+        "wifi_api.c"
+        "wifi_api_policy.c"
+    INCLUDE_DIRS "include"
+    REQUIRES
+        app_types
+        diagnostics
+        esp_http_server
+        esp_wifi
+        wifi_manager
+    PRIV_REQUIRES
+        controller
+        runtime
+        firmware_update
+        esp_hw_support
+        lwip
+        espressif__cjson
+        web
+)

@@ -1,0 +1,24 @@
+menu "P1S Heat Controller"
+
+config P1S_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Name of the network the controller joins at boot. The controller is
+        station-only, so a board built without this never reaches the network
+        and its web UI stays unreachable. Heat regulation is unaffected.
+
+        Supply this through the gitignored sdkconfig.secret, never through
+        sdkconfig.defaults, which is tracked in Git.
+
+config P1S_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        WPA2 passphrase for P1S_WIFI_SSID: either 8 to 63 bytes, or empty for
+        an open network. Any other length is rejected at startup.
+
+        Supply this through the gitignored sdkconfig.secret, never through
+        sdkconfig.defaults, which is tracked in Git.
+
+endmenu

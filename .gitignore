@@ -1,0 +1,26 @@
+# Generated firmware, test builds, and release packages.
+/build*/
+/test_apps/*/build*/
+/dist/
+
+# Downloaded ESP-IDF components and local dependency resolution.
+managed_components/
+dependencies.lock
+
+# Local generated configurations; keep the reproducible defaults in Git.
+/sdkconfig
+/sdkconfig.*
+!/sdkconfig.defaults
+/test_apps/*/sdkconfig
+/test_apps/*/sdkconfig.*
+!/test_apps/*/sdkconfig.defaults
+
+# Agent scratch files and Python test caches.
+/.superpowers/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# Private signing keys must remain outside version control.
+*private*.pem

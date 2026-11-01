@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P1S Heat Controller</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="bar">
+  <h1>P1S Chamber Heat</h1>
+  <p class="connection" id="connection-state" data-connection="connecting">Connecting</p>
+</header>
+
+<main>
+  <section class="card reading" aria-labelledby="reading-heading">
+    <h2 id="reading-heading">Chamber</h2>
+    <p class="temperature"><span id="current-temperature">--</span><span class="unit">&deg;C</span></p>
+    <p class="secondary">Raw <span id="raw-temperature">--</span> &deg;C &middot; target <span id="target-readout">--</span> &deg;C</p>
+    <p class="state-row">
+      <span class="badge" id="state-badge" data-state="boot">Boot</span>
+      <span class="badge" id="heater-badge" data-on="false">Heater off</span>
+      <span class="badge" id="fan-badge" data-on="false">Fan off</span>
+    </p>
+  </section>
+
+  <section class="card" aria-labelledby="target-heading">
+    <h2 id="target-heading">Target</h2>
+    <div class="target-controls">
+      <label class="visually-hidden" for="target-slider">Target temperature slider</label>
+      <input type="range" id="target-slider" min="0" max="80" step="0.5" value="60">
+      <label class="visually-hidden" for="target-temperature">Target temperature</label>
+      <input type="number" id="target-temperature" min="0" max="80" step="0.5" value="60" inputmode="decimal">
+      <span class="unit">&deg;C</span>
+    </div>
+    <p class="hint" id="target-hint">Zero disables heating. Steps of 0.5 &deg;C.</p>
+    <p class="warning" id="high-target-warning" hidden>
+      <strong>Warning:</strong> targets above 60 &deg;C exceed the usual chamber range. Confirm your material and enclosure can take it.
+    </p>
+    <div class="button-row">
+      <button type="button" id="enable-button" class="primary">Enable heating</button>
+      <button type="button" id="disable-button">Disable</button>
+      <button type="button" id="fan-toggle-button" aria-pressed="false">Run fan manually</button>
+    </div>
+  </section>
+
+  <section class="card fault" id="fault-panel" hidden aria-labelledby="fault-heading">
+    <h2 id="fault-heading">Fault latched</h2>
+    <p class="fault-name" id="fault-name">--</p>
+    <p class="hint">Heating stays off until the cause clears and the fault is acknowledged.</p>
+    <button type="button" id="acknowledge-button">Acknowledge fault</button>
+  </section>
+
+  <section class="card" aria-labelledby="firmware-heading">
+    <h2 id="firmware-heading">Firmware</h2>
+    <p class="secondary">Installed <span id="firmware-version">--</span></p>
+    <p class="hint">Downloads the latest signed release. Heating stops while firmware is installed.</p>
+    <button type="button" id="firmware-update-button" disabled>Update firmware</button>
+    <progress id="firmware-progress" max="100" value="0" aria-label="Firmware download progress" hidden></progress>
+    <p class="hint firmware-message" id="firmware-message" role="status" aria-live="polite">Reading firmware status…</p>
+  </section>
+
+  <section class="card" aria-labelledby="network-heading">
+    <h2 id="network-heading">Network</h2>
+    <dl class="details">
+      <dt>Address</dt><dd id="ip-address">--</dd>
+      <dt>Signal</dt><dd id="wifi-rssi">--</dd>
+      <dt>Uptime</dt><dd id="uptime">--</dd>
+      <dt>Valid samples</dt><dd id="consecutive-valid">--</dd>
+    </dl>
+  </section>
+
+  <section class="card wifi-card" aria-labelledby="wifi-heading">
+    <h2 id="wifi-heading">Wi-Fi settings</h2>
+    <form id="wifi-form">
+      <label for="wifi-ssid">Network name (SSID)</label>
+      <input type="text" id="wifi-ssid" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+      <label for="wifi-password">Wi-Fi password</label>
+      <input type="text" id="wifi-password" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="wifi-help">
+      <p class="hint" id="wifi-help">Saved on this controller. Spaces are kept. Leave the password empty for an open network.</p>
+      <button type="submit" id="wifi-save-button" class="primary" disabled>Save &amp; Connect</button>
+    </form>
+    <p class="hint">Save connects immediately without a restart. If this page disconnects, join <strong>P1S-Heat-Setup</strong> and open <a href="http://192.168.4.1/">192.168.4.1</a> to continue.</p>
+    <p class="hint wifi-message" id="wifi-message" role="status" aria-live="polite">Reading Wi-Fi settings…</p>
+    <p class="hint">Setup hotspot: <span id="wifi-hotspot">--</span></p>
+    <a id="wifi-station-link" class="wifi-address" hidden>Open controller</a>
+    <p class="hint">After changing networks, join your new Wi-Fi and open
+      <a id="wifi-discovery-link" href="http://p1s-heat.local/">p1s-heat.local</a>.
+      The setup hotspot may already have closed after a successful connection.</p>
+  </section>
+</main>
+
+<p class="live" id="status-message" role="status" aria-live="polite"></p>
+
+<script src="/app.js"></script>
+<script src="/wifi.js"></script>
+</body>
+</html>

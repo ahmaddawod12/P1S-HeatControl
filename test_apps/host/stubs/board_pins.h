@@ -1,0 +1,2 @@
+#pragma once
+#define BOARD_TEMPERATURE_SENSOR_GPIO 27

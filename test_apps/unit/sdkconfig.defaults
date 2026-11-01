@@ -1,0 +1,12 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_UNITY_ENABLE_FLOAT=y
+CONFIG_UNITY_ENABLE_DOUBLE=y
+# Diagnostics timestamps and uptime are 64-bit.
+CONFIG_UNITY_ENABLE_64BIT=y
+# The [api] cases drive HTTP over loopback, so every client connection costs
+# two lwIP sockets. Four SSE streams plus a probe do not fit in the default 10.
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
