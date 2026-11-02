@@ -13,6 +13,7 @@ typedef struct {
     esp_err_t (*runtime_start)(void);
     esp_err_t (*wifi_start)(void);
     esp_err_t (*web_server_start)(void);
+    esp_err_t (*printer_start)(void); /* Optional; failure is local to printer control. */
     void (*board_outputs_force_off)(void);
     esp_err_t (*report_startup_fault)(heat_fault_t fault);
 } app_startup_ops_t;
@@ -20,7 +21,7 @@ typedef struct {
 app_startup_ops_t app_startup_default_ops(void);
 
 /* Runs the steps in their fixed order. Relay outputs are commanded off on
- * any failure, and nothing here ever enables regulation. Returns the first
+ * any required-service failure, and nothing here ever enables regulation. Returns the first
  * error encountered; a networking or web-server failure still leaves the
  * runtime regulating so the caller can retry. */
 esp_err_t app_startup_run(const app_startup_ops_t *ops);

@@ -185,31 +185,80 @@ static void worker(void *arg)
 }
 static esp_err_t init_stack(void)
 {
+    /* Completed stages own long-lived SDK resources. A later failure must
+     * resume here rather than recreate default netifs/handlers or reinitialize
+     * an already initialized radio. Keep configuration stages too, so a failed
+     * start is retried without changing the radio mode underneath it. */
+    enum {
+        STACK_NONE, STACK_NVS, STACK_NETIF, STACK_EVENT_LOOP, STACK_STA,
+        STACK_AP, STACK_RADIO, STACK_STORAGE, STACK_WIFI_HANDLER,
+        STACK_IP_HANDLER, STACK_AP_MODE, STACK_AP_CONFIG, STACK_STA_MODE
+    };
+    static unsigned stage=STACK_NONE;
     if (s_stack_ready) return ESP_OK;
-    esp_err_t err=nvs_flash_init();
-    if (err==ESP_ERR_NVS_NO_FREE_PAGES || err==ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        err=nvs_flash_erase(); if (err==ESP_OK) err=nvs_flash_init();
+    esp_err_t err;
+    if (stage<STACK_NVS) {
+        err=nvs_flash_init();
+        if (err==ESP_ERR_NVS_NO_FREE_PAGES || err==ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            err=nvs_flash_erase(); if (err==ESP_OK) err=nvs_flash_init();
+        }
+        if (err!=ESP_OK) return err;
+        stage=STACK_NVS;
     }
-    if (err!=ESP_OK) return err;
-    err=esp_netif_init(); if (err!=ESP_OK) return err;
-    err=esp_event_loop_create_default();
-    if (err!=ESP_OK && err!=ESP_ERR_INVALID_STATE) return err;
-    s_sta_netif=esp_netif_create_default_wifi_sta();
-    if (!s_sta_netif || !esp_netif_create_default_wifi_ap()) return ESP_ERR_NO_MEM;
-    const wifi_init_config_t init=WIFI_INIT_CONFIG_DEFAULT();
-    err=esp_wifi_init(&init); if (err!=ESP_OK) return err;
-    err=esp_wifi_set_storage(WIFI_STORAGE_RAM); if (err!=ESP_OK) return err;
-    err=esp_event_handler_instance_register(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_event,NULL,NULL);
-    if (err==ESP_OK) err=esp_event_handler_instance_register(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event,NULL,NULL);
-    if (err!=ESP_OK) return err;
+    if (stage<STACK_NETIF) {
+        err=esp_netif_init(); if (err!=ESP_OK) return err;
+        stage=STACK_NETIF;
+    }
+    if (stage<STACK_EVENT_LOOP) {
+        err=esp_event_loop_create_default();
+        if (err!=ESP_OK && err!=ESP_ERR_INVALID_STATE) return err;
+        stage=STACK_EVENT_LOOP;
+    }
+    if (stage<STACK_STA) {
+        s_sta_netif=esp_netif_create_default_wifi_sta();
+        if (!s_sta_netif) return ESP_ERR_NO_MEM;
+        stage=STACK_STA;
+    }
+    if (stage<STACK_AP) {
+        if (!esp_netif_create_default_wifi_ap()) return ESP_ERR_NO_MEM;
+        stage=STACK_AP;
+    }
+    if (stage<STACK_RADIO) {
+        const wifi_init_config_t init=WIFI_INIT_CONFIG_DEFAULT();
+        err=esp_wifi_init(&init); if (err!=ESP_OK) return err;
+        stage=STACK_RADIO;
+    }
+    if (stage<STACK_STORAGE) {
+        err=esp_wifi_set_storage(WIFI_STORAGE_RAM); if (err!=ESP_OK) return err;
+        stage=STACK_STORAGE;
+    }
+    if (stage<STACK_WIFI_HANDLER) {
+        err=esp_event_handler_instance_register(WIFI_EVENT,ESP_EVENT_ANY_ID,wifi_event,NULL,NULL);
+        if (err!=ESP_OK) return err;
+        stage=STACK_WIFI_HANDLER;
+    }
+    if (stage<STACK_IP_HANDLER) {
+        err=esp_event_handler_instance_register(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event,NULL,NULL);
+        if (err!=ESP_OK) return err;
+        stage=STACK_IP_HANDLER;
+    }
     /* Configure AP before starting the radio so no default SSID is exposed. */
-    err=esp_wifi_set_mode(WIFI_MODE_APSTA); if (err!=ESP_OK) return err;
-    wifi_config_t ap={0};
-    memcpy(ap.ap.ssid,WIFI_MANAGER_AP_SSID,strlen(WIFI_MANAGER_AP_SSID));
-    ap.ap.ssid_len=strlen(WIFI_MANAGER_AP_SSID); ap.ap.channel=1;
-    ap.ap.authmode=WIFI_AUTH_OPEN; ap.ap.max_connection=4;
-    err=esp_wifi_set_config(WIFI_IF_AP,&ap); if (err!=ESP_OK) return err;
-    err=esp_wifi_set_mode(WIFI_MODE_STA); if (err!=ESP_OK) return err;
+    if (stage<STACK_AP_MODE) {
+        err=esp_wifi_set_mode(WIFI_MODE_APSTA); if (err!=ESP_OK) return err;
+        stage=STACK_AP_MODE;
+    }
+    if (stage<STACK_AP_CONFIG) {
+        wifi_config_t ap={0};
+        memcpy(ap.ap.ssid,WIFI_MANAGER_AP_SSID,strlen(WIFI_MANAGER_AP_SSID));
+        ap.ap.ssid_len=strlen(WIFI_MANAGER_AP_SSID); ap.ap.channel=1;
+        ap.ap.authmode=WIFI_AUTH_OPEN; ap.ap.max_connection=4;
+        err=esp_wifi_set_config(WIFI_IF_AP,&ap); if (err!=ESP_OK) return err;
+        stage=STACK_AP_CONFIG;
+    }
+    if (stage<STACK_STA_MODE) {
+        err=esp_wifi_set_mode(WIFI_MODE_STA); if (err!=ESP_OK) return err;
+        stage=STACK_STA_MODE;
+    }
     err=esp_wifi_start(); if (err!=ESP_OK) return err;
     s_stack_ready=true; return ESP_OK;
 }

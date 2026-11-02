@@ -7,6 +7,8 @@ idf_component_register(
         "firmware_api_policy.c"
         "wifi_api.c"
         "wifi_api_policy.c"
+        "printer_api.c"
+        "printer_api_policy.c"
     INCLUDE_DIRS "include"
     REQUIRES
         app_types
@@ -18,7 +20,10 @@ idf_component_register(
         controller
         runtime
         firmware_update
+        printer_control
+        device_config
         esp_hw_support
+        esp_timer
         lwip
         espressif__cjson
         web

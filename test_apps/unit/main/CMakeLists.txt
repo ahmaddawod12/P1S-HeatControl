@@ -13,6 +13,8 @@ idf_component_register(
         "test_wifi_config.c"
         "test_diagnostics.c"
         "test_api_contract.c"
+        "test_printer_api.c"
+        "test_printer_control.c"
         "test_web_server.c"
         "test_web_assets.c"
         "test_app_startup.c"
@@ -24,6 +26,9 @@ idf_component_register(
         controller
         settings
         device_config
+        printer_control
+        printer_link
+        clock_service
         firmware_update
         board
         runtime
@@ -39,5 +44,7 @@ idf_component_register(
         esp_netif
         esp_event
         espressif__cjson
+        espressif__mqtt
     WHOLE_ARCHIVE
+    PRIV_INCLUDE_DIRS "../../../components/web_server"
 )

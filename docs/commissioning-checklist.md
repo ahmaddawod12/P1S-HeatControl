@@ -1,5 +1,27 @@
 # P1S Heat Controller Commissioning Checklist
 
+Printer integration status (2026-11-02): source tests/builds are recorded in
+[printer qualification](printer-integration-qualification.md). No printer
+connection, board flashing, native Unity execution or heated integration trial
+was performed for this feature. Automatic Resume remains disabled in generic
+builds. Complete the original relay/sensor stages below before heated testing.
+
+## Optional printer integration — pending
+
+- [ ] Record actual P1S firmware, Bambu Studio version, LAN/developer mode and explicit board/port authorization.
+- [ ] Prove verified status-only TLS, usable run identity, report cadence and repeated identical filenames/local `0` IDs.
+- [ ] Qualify the PC startup pause before purge, prime and model extrusion; record earlier motion/heating.
+- [ ] Prove one live QoS 0 Resume, no queued/reconnected replay, and the native 1,000 ms send deadline under backpressure.
+- [ ] Prove Stop/Disable/fault/lease expiry during a waiting send and hold the operation owner until outputs acknowledge teardown.
+- [ ] Run the native fake-transport Unity/API cases on an explicitly selected authorized board, including four SSE clients.
+- [ ] Measure heap/largest-block and task-stack margins with TLS, maximum reports, SSE/polling and idle OTA suspension.
+- [ ] After unloaded-relay passes, supervise preheat → one Resume → hold → real finish → heater off/cooldown, plus each interruption case.
+- [ ] Verify reboot/reconnect never restores heat or Resume; recheck manual heating, manual fan and thermal faults.
+- [ ] Record the exact qualified profile/version/build combination before enabling an opted-in commissioning image.
+
+All boxes above remain unchecked. Use the detailed evidence matrix in
+[printer integration qualification](printer-integration-qualification.md).
+
 Work through the stages **in order**. Record a pass or fail with the date and
 your initials for every line. A stage that fails stops commissioning — fix the
 cause and restart that stage before moving on.

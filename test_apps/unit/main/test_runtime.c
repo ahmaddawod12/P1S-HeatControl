@@ -202,6 +202,21 @@ TEST_CASE("runtime starts disabled with the stored target and outputs off",
     app_runtime_stop();
 }
 
+TEST_CASE("automatic heating lease expires and never renews a consumed run", "[runtime]")
+{
+    start_ready_runtime(25.0f);
+    const uint64_t now=(uint64_t)esp_timer_get_time()/1000;
+    TEST_ESP_OK(app_runtime_auto_acquire(11,status_now().target_c,now+5000));
+    WAIT_FOR(fake_heater_on(),1000);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED,app_runtime_set_target(55));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED,app_runtime_set_enabled(true));
+    WAIT_FOR(!fake_heater_on(),6000);
+    runtime_auto_status_t automatic;app_runtime_get_auto_status(&automatic);
+    TEST_ASSERT_FALSE(automatic.active);TEST_ASSERT_TRUE(automatic.teardown_applied);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE,app_runtime_auto_renew(11,(uint64_t)esp_timer_get_time()/1000+5000));
+    app_runtime_stop();
+}
+
 TEST_CASE("manual fan runs independently while heating is disabled",
           "[runtime]")
 {

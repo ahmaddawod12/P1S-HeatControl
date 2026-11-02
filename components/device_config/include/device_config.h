@@ -1,8 +1,11 @@
 #pragma once
 #include "esp_err.h"
 #include "firmware_types.h"
+#include "printer_types.h"
 
-typedef struct { char ssid[33], password[64]; } device_wifi_credentials_t;
+typedef struct {
+  char ssid[33], password[64];
+} device_wifi_credentials_t;
 esp_err_t device_config_init(void);
 esp_err_t device_config_load_wifi(device_wifi_credentials_t *out);
 esp_err_t device_config_seed_wifi(const device_wifi_credentials_t *seed);
@@ -11,3 +14,7 @@ esp_err_t device_config_load_attempt(firmware_attempt_t *out);
 esp_err_t device_config_save_attempt(const firmware_attempt_t *attempt);
 esp_err_t device_config_bootstrap_confirmed(void);
 esp_err_t device_config_confirm_bootstrap(void);
+bool printer_config_valid(const printer_connection_config_t *config);
+esp_err_t device_config_load_printer(printer_connection_config_t *out);
+esp_err_t device_config_save_printer(const printer_connection_config_t *config);
+esp_err_t device_config_clear_printer(void);

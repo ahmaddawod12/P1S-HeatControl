@@ -13,3 +13,7 @@ CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
 # CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set
 CONFIG_SECURE_BOOT_VERIFICATION_KEY="config/ota_signing_public.bin"
 CONFIG_LWIP_MAX_SOCKETS=16
+# Reserve room for one queued dispatcher event and an SDK event. The adapter
+# rejects fewer than two slots and requires the default enabled API locks.
+CONFIG_MQTT_USE_CUSTOM_CONFIG=y
+CONFIG_MQTT_EVENT_QUEUE_SIZE=4

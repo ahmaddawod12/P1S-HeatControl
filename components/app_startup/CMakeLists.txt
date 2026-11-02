@@ -10,4 +10,6 @@ idf_component_register(
         wifi_manager
         nvs_flash
         firmware_update
+        printer_link
+        printer_control
 )

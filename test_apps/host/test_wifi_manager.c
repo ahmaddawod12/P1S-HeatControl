@@ -139,6 +139,13 @@ static void failed_disconnect_does_not_mask_router_failure(void)
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    reset_fixture(true);
+    for(service_operation_t owner=SERVICE_OPERATION_PRINTER_CONFIG;owner<=SERVICE_OPERATION_PRINTER_CYCLE;++owner){
+        assert(service_operation_begin(owner));
+        wifi_manager_status_t status;wifi_manager_get_status(&status);
+        assert(!status.can_save && wifi_manager_request_credentials(&k_next)==ESP_ERR_NOT_ALLOWED);
+        service_operation_end(owner);
+    }
     if (strcmp(argv[1], "router") == 0) router_disconnect_before_dhcp_retries();
     else if (strcmp(argv[1], "association") == 0) association_clears_an_unreported_local_disconnect();
     else if (strcmp(argv[1], "replacement") == 0) credential_change_consumes_only_its_own_disconnect();

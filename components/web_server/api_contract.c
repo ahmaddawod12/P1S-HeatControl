@@ -79,22 +79,52 @@ static esp_err_t print_into(cJSON *root, char *out_json, size_t capacity)
     return err;
 }
 
+/* Reject recursive values before cJSON can consume the small HTTP task stack.
+ * The target contract is a single scalar field, so nesting is never useful. */
+static bool target_body_flat(const char *body, size_t length)
+{
+    bool quoted = false;
+    unsigned depth = 0U;
+    for (size_t i = 0U; i < length; ++i) {
+        const unsigned char c = (unsigned char) body[i];
+        if (quoted && c == '\\') {
+            if (i + 5U < length && body[i + 1U] == 'u' &&
+                memcmp(body + i + 2U, "0000", 4U) == 0) {
+                return false;
+            }
+            if (++i >= length) return false;
+        } else if (c == '"') {
+            quoted = !quoted;
+        } else if (quoted) {
+            if (c < 0x20U) return false;
+        } else if (c == '{' || c == '[') {
+            if (++depth > 1U) return false;
+        } else if (c == '}' || c == ']') {
+            if (depth == 0U) return false;
+            --depth;
+        }
+    }
+    return !quoted && depth == 0U;
+}
+
 esp_err_t api_parse_target(const char *body, float *out_target)
 {
     if (body == NULL || out_target == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (strnlen(body, API_MAX_BODY_BYTES + 1U) > API_MAX_BODY_BYTES) {
+    const size_t length = strnlen(body, API_MAX_BODY_BYTES + 1U);
+    if (length > API_MAX_BODY_BYTES) {
         return ESP_ERR_INVALID_SIZE;
     }
+    if (!target_body_flat(body, length)) return ESP_ERR_INVALID_ARG;
 
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = cJSON_ParseWithOpts(body, NULL, true);
     if (root == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
     esp_err_t err = ESP_ERR_INVALID_ARG;
-    if (cJSON_IsObject(root)) {
+    if (cJSON_IsObject(root) && cJSON_GetArraySize(root) == 1) {
         const cJSON *target =
             cJSON_GetObjectItemCaseSensitive(root, "target_c");
         if (cJSON_IsNumber(target)) {

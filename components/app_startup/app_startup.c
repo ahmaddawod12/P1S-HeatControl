@@ -12,6 +12,7 @@
 #include "web_server.h"
 #include "wifi_manager.h"
 #include "firmware_update.h"
+#include "printer_control.h"
 
 #define RETRY_PERIOD_MS 10000U
 
@@ -59,6 +60,7 @@ app_startup_ops_t app_startup_default_ops(void)
         .runtime_start = app_runtime_start,
         .wifi_start = wifi_manager_start,
         .web_server_start = default_web_start,
+        .printer_start = printer_control_start,
         .board_outputs_force_off = default_force_off,
         .report_startup_fault = app_runtime_report_startup_fault,
     };
@@ -136,6 +138,10 @@ esp_err_t app_startup_run(const app_startup_ops_t *ops)
         }
     }
 
+    if (ops->printer_start != NULL) {
+        const esp_err_t printer_err=ops->printer_start();
+        if(printer_err!=ESP_OK) ESP_LOGW(TAG,"optional printer service unavailable: %s",esp_err_to_name(printer_err));
+    }
     return first_error;
 }
 

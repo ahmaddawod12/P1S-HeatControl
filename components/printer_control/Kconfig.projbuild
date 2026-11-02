@@ -1,0 +1,9 @@
+menu "P1S printer integration"
+config P1S_PRINTER_AUTO_RESUME
+    bool "Enable qualified P1S preheat and Resume"
+    default n
+    help
+        Enable only after the startup pause before all extrusion and native
+        Resume deadline have passed the documented compatibility qualification.
+        Monitoring and configuration work without this option.
+endmenu

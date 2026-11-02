@@ -11,8 +11,10 @@ bridge. The DS18B20 DATA input uses bidirectional GPIO27; GPIO25 and GPIO26
 control the heater and fan relays.
 
 The local dashboard includes signed firmware updates from a separate public
-GitHub releases repository. There is no application password or Bambu
-integration. Everything the browser loads is served from the device.
+GitHub releases repository and optional verified local MQTT monitoring for a
+Bambu P1S. There is no application password. Everything the browser loads is
+served from the device. Automatic preheat/Resume is implemented behind a
+default-off qualification gate; the owner's printer workflow is still untested.
 
 > **Mains warning.** The heater channel switches 220 VAC. Commission the board
 > with both relay contacts unloaded and work through
@@ -112,7 +114,8 @@ under **P1S Heat Controller Board → Relay channels are active low**
 | Circulation fan | On with the heater or manually, plus 5 s after reaching the target or 10 s after disable |
 | Over-temperature | Latched fault at 82 °C from raw **or** filtered temperature |
 
-Persisted: Wi-Fi credentials, target, and calibration offset. **Never**
+Persisted: Wi-Fi credentials, target, calibration offset, and optional printer
+connection settings. **Never**
 persisted: enabled state, active fault, runtime state, or relay state. Both
 relays start inactive on every boot and reset, and heating never resumes
 automatically — someone has to enable it again.
@@ -123,6 +126,36 @@ chamber below 80 °C; an output-initialisation fault cannot be cleared in
 software.
 
 Regulation keeps running through a Wi-Fi outage.
+
+### Optional P1S monitoring and preheat/Resume
+
+Open **Printer connection** on the dashboard and save the printer IPv4, serial,
+LAN access code and reachable time server. The access code is write only; omit
+it to preserve the saved code only for the same serial. Monitoring uses verified
+TLS on the local network. An unavailable printer does not block manual chamber
+control or dashboard startup.
+
+The intended automated workflow is: the PC prepares and submits the complete
+job with a qualified initial pause before all extrusion; the operator confirms
+that pause and selects **Preheat & Resume**; the ESP32 reaches the existing
+target, settles within ±1 °C for 30 seconds, and permits one Resume attempt.
+It maintains chamber control until actual printer finish. It never selects a
+file or carries print options. A file merely open on the PC is not a resumable
+job.
+
+**Automatic Resume is currently unavailable in generic builds.** P1S firmware,
+Bambu Studio version, exact pause command/placement and live timing/resources
+still require qualification. `CONFIG_P1S_PRINTER_AUTO_RESUME` defaults to `n`.
+See [qualification](docs/printer-integration-qualification.md) and the
+[PC startup profile procedure](docs/printer-startup-profile.md).
+
+Active automation captures the target and uses a revocable heat lease, renewed
+every second for at most five seconds. The independent 100 ms runtime enforces
+expiry. Connection/status loss, a thermal fault, later printer pause, changed
+job, cancellation or uncertain Resume ends chamber control. Reconnect and
+reboot do not restore a cycle. **Stop chamber control** and **Disable** revoke
+automation without cancelling the printer job; manual-fan control remains
+independent. Wi-Fi changes and OTA cannot overlap an active cycle.
 
 ## Network
 
@@ -172,7 +205,25 @@ enable heating or clear a fault.
 | POST | `/api/firmware/update` | Start one update, with `{}`, matching Origin and `X-P1S-CSRF` |
 | GET | `/api/wifi` | Visible saved credentials, connection/hotspot status and CSRF token; no-store |
 | PUT | `/api/wifi` | Save `{"ssid":"network","password":"password"}` with matching Origin and `X-P1S-CSRF`; returns 202 |
-| GET | `/`, `/styles.css`, `/app.js`, `/wifi.js` | Dashboard |
+| GET | `/api/printer` | Redacted connection/readiness, printer/job/progress, cycle/outcome, offered arm token and CSRF token; no-store |
+| PUT | `/api/printer/config` | Admit printer settings save; 202; preserve an omitted access code only for the same serial |
+| DELETE | `/api/printer/config` | Forget only the printer record; 204 after storage confirms the clear |
+| POST | `/api/printer/cycle` | Admit `{"arm_token":"…","initial_pause_confirmed":true}` using the existing chamber target; 202 |
+| POST | `/api/printer/cycle/stop` | Revoke chamber automation; 204; does not cancel the printer job |
+| GET | `/`, `/styles.css`, `/app.js`, `/wifi.js`, `/printer.js` | Dashboard |
+
+All chamber mutations (`/api/target`, `/api/control/*`, and `/api/fault/acknowledge`)
+require a matching local `Origin` and `X-P1S-CSRF`, using the per-boot token from
+`GET /api/firmware`. This applies through both the normal network and setup
+hotspot. Missing or mismatched headers return `403`. The dashboard reads the
+current token before each deliberate chamber command; it never retries a mutation.
+Target bodies must contain exactly one numeric `target_c` field. Nested input
+is rejected before recursive JSON parsing; duplicate, unknown and trailing
+input is also rejected.
+Bodies remain limited to 256 bytes. A receive timeout or expired five-second
+body deadline returns `408` and releases the HTTP task for other requests.
+The chamber control and fault-acknowledgement POSTs require empty bodies;
+nonempty bodies return `400` and close the connection before any command runs.
 
 Successful commands return `204`. Validation failures return `400`, enable and
 acknowledge precondition failures `409`, an unavailable command queue `503`,
@@ -184,7 +235,13 @@ Firmware update requests return `202` when accepted, `409` while busy or in
 trial maintenance, and `503` when unavailable. Maintenance also rejects heat
 enable, target changes, manual fan enable and fault acknowledgement with `409`.
 The LAN dashboard has no account authentication; the update route checks the
-request's local origin and per-boot token.
+request's local origin and per-boot token. All printer mutations use the same
+Origin/`X-P1S-CSRF` protection, with 400 for invalid input, 403 for an untrusted
+request, 409 for a conflicting/ineligible request, and 503 for unavailability.
+Printer inputs are limited to 1,024 bytes and status to 2,048 bytes. The existing
+512-byte status/SSE contract is unchanged. The printer settings fields are
+`enabled`, `ipv4`, `serial`, optional `access_code`, and optional `ntp_host`
+(default `pool.ntp.org`). Unknown/duplicate fields and trailing JSON are rejected.
 
 State names on the wire: `boot`, `idle`, `heating`, `holding`, `fault`. Fault names: `none`, `sensor_open`, `sensor_short`, `sensor_range`,
 `sensor_invalid`, `sensor_stale`, `overtemperature`, `nvs`, `output_init`.
@@ -295,10 +352,15 @@ $p1sCmake = 'cmake'
 & $p1sCmake -S test_apps/host -B test_apps/host/build -G 'MinGW Makefiles'
 & $p1sCmake --build test_apps/host/build
 & $p1sCmake --build test_apps/host/build --target test
-node --test test_apps/web/test_firmware_dashboard.cjs
+node --test test_apps/web/*.cjs
 python -m unittest discover -s test_apps/tools -v
 ./test_apps/tools/test_publish_firmware.ps1
 ```
+
+After building `build-release`, run `python tools/check_printer_stack.py --build build-release`
+to check the compiled HTTP arm path against its stack budget.
+Actual source verification results and pending physical checks are recorded in
+[printer qualification](docs/printer-integration-qualification.md).
 
 ## Startup order
 
@@ -310,6 +372,8 @@ python -m unittest discover -s test_apps/tools -v
 4. `app_runtime_start`
 5. `wifi_manager_start` — dedicated device configuration and saved Wi-Fi
 6. `web_server_start`, then the update worker
+7. Optional printer coordinator — saved connection settings restore monitoring
+   only; an active cycle, heater ownership and Resume intent never restore
 
 A relay or runtime failure stops startup with the outputs off. A networking or
 web-server failure leaves the runtime regulating and retries in the background.
@@ -324,10 +388,13 @@ web-server failure leaves the runtime regulating and retries in the background.
 | `components/temperature/` | Median filtering, calibration, validity, staleness |
 | `components/controller/` | Pure state machine |
 | `components/settings/` | Versioned NVS schema |
-| `components/device_config/` | Dedicated Wi-Fi and update-attempt NVS records |
+| `components/device_config/` | Dedicated Wi-Fi, update-attempt and optional printer NVS records |
 | `components/firmware_update/` | Signed OTA transport, worker and boot confirmation |
 | `components/board/` | Independent relay output safety and ordering |
-| `components/runtime/` | Tasks, queues, and the only relay handle |
+| `components/runtime/` | Tasks, queues, independent automatic heat leases, and the only relay handle |
+| `components/clock_service/` | Shared cancellable time synchronization for verified TLS |
+| `components/printer_link/` | Bounded reports, run identity and verified local MQTT transport |
+| `components/printer_control/` | Explicit per-run preheat/Resume policy and coordinating worker |
 | `components/diagnostics/` | 32-entry transition ring buffer |
 | `components/wifi_manager/` | Saved credentials, fallback hotspot, async changes, reconnect, mDNS |
 | `components/web_server/` | JSON contract, REST routes, SSE hub |

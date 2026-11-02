@@ -88,6 +88,10 @@ BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack, voi
     if (pthread_create(&thread, NULL, task_entry, task)) { free(task); if (out) *out = NULL; return pdFALSE; }
     pthread_detach(thread); return pdPASS;
 }
+#ifndef HOST_FREERTOS_NO_DELAY
 void vTaskDelay(TickType_t ticks) { Sleep(ticks); }
+#endif
 void vTaskDelete(TaskHandle_t task) { (void) task; pthread_exit(NULL); }
+#ifndef HOST_FREERTOS_NO_TIMER
 int64_t esp_timer_get_time(void) { return (int64_t) GetTickCount64() * 4000; }
+#endif

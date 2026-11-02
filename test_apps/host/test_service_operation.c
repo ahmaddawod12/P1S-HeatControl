@@ -24,6 +24,11 @@ int main(void)
     service_operation_end(SERVICE_OPERATION_WIFI);
     assert(service_operation_current() == SERVICE_OPERATION_TRIAL);
     service_operation_end(SERVICE_OPERATION_TRIAL);
+    for(service_operation_t a=SERVICE_OPERATION_WIFI;a<=SERVICE_OPERATION_PRINTER_CYCLE;a++){
+        assert(service_operation_begin(a));
+        for(service_operation_t b=SERVICE_OPERATION_WIFI;b<=SERVICE_OPERATION_PRINTER_CYCLE;b++)assert(!service_operation_begin(b));
+        service_operation_end(a);
+    }
     for (unsigned i=0; i<32; ++i) {
         pthread_t a,b;
         service_operation_t wifi=SERVICE_OPERATION_WIFI, ota=SERVICE_OPERATION_OTA;

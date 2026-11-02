@@ -7,6 +7,7 @@
 
 #define LOG_CAPACITY 12U
 #define NAME_CAPACITY 32U
+static app_startup_ops_t fake_ops(void);
 
 static char s_log[LOG_CAPACITY][NAME_CAPACITY];
 static size_t s_count;
@@ -61,6 +62,15 @@ static esp_err_t fake_web_start(void)
 {
     note("web_server_start");
     return s_web_result;
+}
+static esp_err_t fake_printer_failure(void) { note("printer_start");return ESP_ERR_NO_MEM; }
+TEST_CASE("optional printer failure is nonfatal", "[startup]") {
+    app_startup_ops_t ops=fake_ops();
+    ops.printer_start=fake_printer_failure;
+    TEST_ESP_OK(app_startup_run(&ops));
+    TEST_ASSERT_EQUAL_STRING("web_server_start",s_log[5]);
+    TEST_ASSERT_EQUAL_STRING("printer_start",s_log[6]);
+    TEST_ASSERT_EQUAL_UINT32(7,s_count);
 }
 
 static void fake_force_off(void)

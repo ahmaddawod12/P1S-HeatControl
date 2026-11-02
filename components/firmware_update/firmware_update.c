@@ -4,6 +4,8 @@
 #include "app_runtime.h"
 #include "device_config.h"
 #include "service_operation.h"
+#include "printer_link.h"
+#include "esp_timer.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -48,7 +50,14 @@ static void worker(void *arg)
         (void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         firmware_status_t status = {0};
         strcpy(status.installed, custom_app_desc.version);
-        firmware_job_run(&status, &ops, publish, NULL);
+        printer_link_suspend(true);
+        const uint64_t release_deadline=(uint64_t)(esp_timer_get_time()/1000)+5000;
+        while(!printer_link_quiescent() && (uint64_t)(esp_timer_get_time()/1000)<release_deadline) vTaskDelay(pdMS_TO_TICKS(100));
+        if(printer_link_quiescent()) firmware_job_run(&status, &ops, publish, NULL);
+        else {
+            status.phase=FIRMWARE_FAILED;status.result=FIRMWARE_RESULT_CHECK_FAILED;publish(&status,NULL);
+        }
+        printer_link_suspend(false);
         atomic_store(&s_busy, false);
         service_operation_end(SERVICE_OPERATION_OTA);
     }

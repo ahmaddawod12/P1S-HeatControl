@@ -9,6 +9,8 @@ extern const char styles_css_start[] asm("_binary_styles_css_start");
 extern const char styles_css_end[] asm("_binary_styles_css_end");
 extern const char app_js_start[] asm("_binary_app_js_start");
 extern const char app_js_end[] asm("_binary_app_js_end");
+extern const char printer_js_start[] asm("_binary_printer_js_start");
+extern const char printer_js_end[] asm("_binary_printer_js_end");
 
 TEST_CASE("dashboard asset contains required controls", "[web]")
 {
@@ -20,6 +22,13 @@ TEST_CASE("dashboard asset contains required controls", "[web]")
     TEST_ASSERT_NOT_NULL(strstr(index_html_start, "id=\"enable-button\""));
     TEST_ASSERT_NOT_NULL(strstr(index_html_start, "id=\"fan-toggle-button\""));
     TEST_ASSERT_NOT_NULL(strstr(index_html_start, "id=\"fault-panel\""));
+    TEST_ASSERT_NOT_NULL(strstr(index_html_start,"id=\"printer-preheat\""));
+    TEST_ASSERT_NOT_NULL(strstr(index_html_start,"id=\"printer-confirm\""));
+}
+TEST_CASE("printer script is self-hosted without embedded NUL", "[web]") {
+    TEST_ASSERT_NOT_NULL(strstr(printer_js_start,"/api/printer"));
+    TEST_ASSERT_NULL(strstr(printer_js_start,"innerHTML"));
+    TEST_ASSERT_EQUAL_UINT32((size_t)(printer_js_end-printer_js_start)-1,strlen(printer_js_start));
 }
 
 TEST_CASE("dashboard asset is accessible and self-hosted", "[web]")

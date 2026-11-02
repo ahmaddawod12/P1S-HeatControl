@@ -4,4 +4,5 @@ idf_component_register(
         "styles.css"
         "app.js"
         "wifi.js"
+        "printer.js"
 )

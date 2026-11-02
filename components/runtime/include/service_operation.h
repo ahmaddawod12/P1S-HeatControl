@@ -2,7 +2,7 @@
 #include <stdbool.h>
 typedef enum {
     SERVICE_OPERATION_NONE, SERVICE_OPERATION_WIFI, SERVICE_OPERATION_OTA,
-    SERVICE_OPERATION_TRIAL
+    SERVICE_OPERATION_TRIAL, SERVICE_OPERATION_PRINTER_CONFIG, SERVICE_OPERATION_PRINTER_CYCLE
 } service_operation_t;
 /* Only a successful admission may be ended. Owners span asynchronous work;
  * this gate never changes heater state. */

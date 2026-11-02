@@ -5,6 +5,24 @@
 #include "unity.h"
 #include <string.h>
 
+TEST_CASE("optional printer record survives reload and clear preserves Wi-Fi", "[device_config]")
+{
+    TEST_ESP_OK(device_config_init());
+    TEST_ESP_OK(device_config_clear_printer());
+    printer_connection_config_t p={.enabled=true,.ipv4="192.168.1.9",.serial="TEST123",.access_code="test-code",.ntp_host="pool.ntp.org"}, got;
+    device_wifi_credentials_t wifi={"fixture","fixture-password"}, saved;
+    TEST_ESP_OK(device_config_save_wifi(&wifi));
+    TEST_ESP_OK(device_config_save_printer(&p));
+    TEST_ESP_OK(device_config_init());
+    TEST_ESP_OK(device_config_load_printer(&got));
+    TEST_ASSERT_EQUAL_STRING(p.serial,got.serial);
+    TEST_ASSERT_EQUAL_STRING(p.access_code,got.access_code);
+    TEST_ESP_OK(device_config_clear_printer());
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,device_config_load_printer(&got));
+    TEST_ESP_OK(device_config_load_wifi(&saved));
+    TEST_ASSERT_EQUAL_STRING(wifi.ssid,saved.ssid);
+}
+
 TEST_CASE("saved Wi-Fi survives generic firmware and attempt updates", "[device_config]")
 {
     (void) nvs_flash_deinit_partition("device_cfg");

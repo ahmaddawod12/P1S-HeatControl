@@ -156,3 +156,121 @@ esp_err_t device_config_save_attempt(const firmware_attempt_t *attempt)
     put_u32(bytes + 76, (uint32_t) attempt->result);
     return write_record("attempt_v1", bytes, sizeof(bytes));
 }
+
+#define PRINTER_BYTES 376U
+
+static bool ascii_alnum(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9');
+}
+static bool ipv4_valid(const char *s) {
+  for (unsigned part = 0; part < 4; part++) {
+    const char *start = s;
+    unsigned value = 0, n = 0;
+    while (*s >= '0' && *s <= '9') {
+      value = value * 10 + (unsigned)(*s++ - '0');
+      if (++n > 3 || value > 255)
+        return false;
+    }
+    if (!n || (n > 1 && *start == '0'))
+      return false;
+    if (part == 3)
+      return *s == 0;
+    if (*s++ != '.')
+      return false;
+  }
+  return false;
+}
+static bool time_host_valid(const char *s) {
+  bool numeric = true;
+  for (const char *p = s; *p; p++)
+    if ((*p < '0' || *p > '9') && *p != '.')
+      numeric = false;
+  if (numeric)
+    return ipv4_valid(s);
+  unsigned n = 0;
+  char previous = 0;
+  for (; *s; s++) {
+    if (*s == '.') {
+      if (!n || previous == '-')
+        return false;
+      n = 0;
+    } else {
+      if (!ascii_alnum(*s) && *s != '-')
+        return false;
+      if (!n && *s == '-')
+        return false;
+      if (++n > 63)
+        return false;
+    }
+    previous = *s;
+  }
+  return n && previous != '-';
+}
+bool printer_config_valid(const printer_connection_config_t *p) {
+  if (!p || !text_fits(p->ipv4, sizeof(p->ipv4)) ||
+      !text_fits(p->serial, sizeof(p->serial)) ||
+      !text_fits(p->access_code, sizeof(p->access_code)) ||
+      !text_fits(p->ntp_host, sizeof(p->ntp_host)))
+    return false;
+  if (!ipv4_valid(p->ipv4) || !p->serial[0] || !p->access_code[0] ||
+      !time_host_valid(p->ntp_host))
+    return false;
+  for (const char *s = p->serial; *s; s++)
+    if (!ascii_alnum(*s))
+      return false;
+  return true;
+}
+esp_err_t device_config_load_printer(printer_connection_config_t *out) {
+  if (!out)
+    return ESP_ERR_INVALID_ARG;
+  uint8_t bytes[PRINTER_BYTES];
+  esp_err_t err = read_record("printer_v1", bytes, sizeof(bytes));
+  if (err != ESP_OK)
+    return err;
+  if (get_u32(bytes + 4) > 1)
+    return ESP_ERR_INVALID_RESPONSE;
+  printer_connection_config_t p = {.enabled = get_u32(bytes + 4) != 0};
+  memcpy(p.ipv4, bytes + 8, 16);
+  memcpy(p.serial, bytes + 24, 33);
+  memcpy(p.access_code, bytes + 57, 65);
+  memcpy(p.ntp_host, bytes + 122, 254);
+  if (!printer_config_valid(&p))
+    return ESP_ERR_INVALID_RESPONSE;
+  *out = p;
+  return ESP_OK;
+}
+esp_err_t device_config_save_printer(const printer_connection_config_t *p) {
+  if (!printer_config_valid(p))
+    return ESP_ERR_INVALID_ARG;
+  printer_connection_config_t old;
+  esp_err_t err = device_config_load_printer(&old);
+  if (err != ESP_OK && err != ESP_ERR_NOT_FOUND)
+    return err;
+  uint8_t bytes[PRINTER_BYTES] = {0};
+  put_u32(bytes, 1);
+  put_u32(bytes + 4, p->enabled ? 1 : 0);
+  memcpy(bytes + 8, p->ipv4, strlen(p->ipv4));
+  memcpy(bytes + 24, p->serial, strlen(p->serial));
+  memcpy(bytes + 57, p->access_code, strlen(p->access_code));
+  memcpy(bytes + 122, p->ntp_host, strlen(p->ntp_host));
+  return write_record("printer_v1", bytes, sizeof(bytes));
+}
+esp_err_t device_config_clear_printer(void) {
+  if (!atomic_load(&s_ready))
+    return ESP_ERR_INVALID_STATE;
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open_from_partition(DEVICE_PARTITION, DEVICE_NAMESPACE,
+                                          NVS_READWRITE, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND)
+    return ESP_OK;
+  if (err != ESP_OK)
+    return err;
+  err = nvs_erase_key(handle, "printer_v1");
+  if (err == ESP_ERR_NVS_NOT_FOUND)
+    err = ESP_OK;
+  else if (err == ESP_OK)
+    err = nvs_commit(handle);
+  nvs_close(handle);
+  return err;
+}

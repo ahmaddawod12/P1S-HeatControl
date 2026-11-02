@@ -8,6 +8,7 @@
 #include "esp_err.h"
 #include "firmware_types.h"
 #include "wifi_manager.h"
+#include "printer_types.h"
 
 /* Injected service boundary so handler tests never start the real
  * controller. */
@@ -21,6 +22,11 @@ typedef struct {
     esp_err_t (*request_firmware_update)(void);
     void (*get_wifi_status)(wifi_manager_status_t *out);
     esp_err_t (*request_wifi_change)(const wifi_credentials_t *credentials);
+    void (*get_printer_status)(printer_control_status_t *out);
+    esp_err_t (*request_printer_config)(const printer_config_request_t *request);
+    esp_err_t (*forget_printer_config)(void);
+    esp_err_t (*arm_printer_cycle)(const printer_arm_request_t *request);
+    esp_err_t (*stop_printer_cycle)(void);
 } web_server_ops_t;
 
 typedef struct {

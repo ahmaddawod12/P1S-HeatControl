@@ -12,5 +12,11 @@ TEST_CASE("firmware admission rejects Wi-Fi and trial operation owners", "[firmw
     TEST_ASSERT_TRUE(service_operation_begin(SERVICE_OPERATION_TRIAL));
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED,firmware_update_request());
     service_operation_end(SERVICE_OPERATION_TRIAL);
+    TEST_ASSERT_TRUE(service_operation_begin(SERVICE_OPERATION_PRINTER_CYCLE));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED,firmware_update_request());
+    service_operation_end(SERVICE_OPERATION_PRINTER_CYCLE);
+    TEST_ASSERT_TRUE(service_operation_begin(SERVICE_OPERATION_PRINTER_CONFIG));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED,firmware_update_request());
+    service_operation_end(SERVICE_OPERATION_PRINTER_CONFIG);
     TEST_ASSERT_EQUAL(SERVICE_OPERATION_NONE,service_operation_current());
 }

@@ -5,7 +5,7 @@ idf_component_register(
     INCLUDE_DIRS "include" "."
     REQUIRES app_types
     PRIV_REQUIRES esp_app_format app_update esp_http_client mbedtls
-        esp_netif esp_timer runtime device_config wifi_manager settings lwip espressif__cjson
+        esp_netif esp_timer runtime device_config wifi_manager settings lwip espressif__cjson clock_service printer_link
 )
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-u custom_app_desc")
 idf_build_get_property(p1s_firmware_version PROJECT_VER)

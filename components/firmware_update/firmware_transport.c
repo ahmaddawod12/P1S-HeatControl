@@ -5,7 +5,7 @@
 #include "esp_app_format.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
-#include "esp_netif_sntp.h"
+#include "clock_service.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "psa/crypto.h"
@@ -111,13 +111,7 @@ static esp_err_t fetch_json(const char *url, size_t maximum, uint64_t deadline, 
 }
 static esp_err_t clock_ready(void)
 {
-    if (time(NULL) >= 1704067200) return ESP_OK;
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    const esp_err_t started = esp_netif_sntp_init(&config);
-    if (started != ESP_OK && started != ESP_ERR_INVALID_STATE) return started;
-    const esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(30000));
-    if (started == ESP_OK) esp_netif_sntp_deinit();
-    return err == ESP_OK && time(NULL) >= 1704067200 ? ESP_OK : ESP_ERR_TIMEOUT;
+    return clock_service_wait("pool.ntp.org", 30000, NULL, NULL);
 }
 
 esp_err_t firmware_transport_check(const char *installed, firmware_candidate_t *out,

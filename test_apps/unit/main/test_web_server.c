@@ -32,6 +32,8 @@ typedef struct {
     wifi_manager_status_t wifi;
     wifi_credentials_t requested_wifi;
     int wifi_calls;
+    printer_control_status_t printer;
+    int printer_arm_calls,printer_stop_calls;
 } fake_service_t;
 
 static fake_service_t s_service;
@@ -73,6 +75,12 @@ static esp_err_t fake_firmware_update(void) { ++s_service.update_calls; return s
 static void fake_wifi_status(wifi_manager_status_t *out) { *out=s_service.wifi; }
 static esp_err_t fake_wifi_change(const wifi_credentials_t *credentials)
 { ++s_service.wifi_calls; s_service.requested_wifi=*credentials; return s_service.command_result; }
+static void fake_printer_status(printer_control_status_t *out){*out=s_service.printer;}
+static esp_err_t fake_printer_arm(const printer_arm_request_t *request){
+    TEST_ASSERT_TRUE(request->initial_pause_confirmed);
+    return s_service.printer_arm_calls++?ESP_ERR_NOT_ALLOWED:ESP_OK;
+}
+static esp_err_t fake_printer_stop(void){++s_service.printer_stop_calls;return ESP_OK;}
 
 /* A regulation-ready device: valid samples, idle, target 60. */
 static void reset_service(void)
@@ -112,6 +120,9 @@ static void start_test_server(void)
             .request_firmware_update = fake_firmware_update,
             .get_wifi_status = fake_wifi_status,
             .request_wifi_change = fake_wifi_change,
+            .get_printer_status = fake_printer_status,
+            .arm_printer_cycle = fake_printer_arm,
+            .stop_printer_cycle = fake_printer_stop,
         },
         .port = TEST_PORT,
     };
@@ -184,16 +195,28 @@ static char *request_with_body(const char *method,
                                const char *path,
                                const char *body)
 {
-    static char request[API_MAX_BODY_BYTES + 256U];
+    static char request[API_MAX_BODY_BYTES + 512U], response[RESPONSE_CAPACITY], token[33];
+    http_exchange("GET /api/firmware HTTP/1.1\r\nHost: 127.0.0.1:8180\r\n"
+                  "Connection: close\r\n\r\n", response, sizeof(response));
+    TEST_ASSERT_EQUAL_INT(200, status_code(response));
+    cJSON *root = cJSON_Parse(strstr(response, "\r\n\r\n") + 4);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *csrf = cJSON_GetObjectItemCaseSensitive(root, "csrf_token");
+    TEST_ASSERT_TRUE(cJSON_IsString(csrf));
+    TEST_ASSERT_EQUAL_UINT32(32, strlen(csrf->valuestring));
+    strcpy(token, csrf->valuestring);
+    cJSON_Delete(root);
     snprintf(request, sizeof(request),
              "%s %s HTTP/1.1\r\n"
-             "Host: 127.0.0.1\r\n"
+             "Host: 127.0.0.1:8180\r\n"
+             "Origin: http://127.0.0.1:8180\r\n"
+             "X-P1S-CSRF: %s\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %u\r\n"
              "Connection: close\r\n"
              "\r\n"
              "%s",
-             method, path, (unsigned) strlen(body), body);
+             method, path, token, (unsigned) strlen(body), body);
     return request;
 }
 
@@ -280,8 +303,64 @@ TEST_CASE("invalid target bodies never reach the runtime", "[api]")
                   response, sizeof(response));
     TEST_ASSERT_EQUAL_INT(400, status_code(response));
 
+    static char nested[257];
+    size_t used = (size_t) sprintf(nested, "{\"target_c\":60,\"x\":");
+    memset(nested + used, '[', 110); used += 110; nested[used++] = '0';
+    memset(nested + used, ']', 110); used += 110; nested[used++] = '}'; nested[used] = 0;
+    http_exchange(request_with_body("PUT", "/api/target", nested), response, sizeof(response));
+    TEST_ASSERT_EQUAL_INT(400, status_code(response));
+
     TEST_ASSERT_EQUAL_INT(0, s_service.set_target_calls);
 
+    TEST_ESP_OK(web_server_stop());
+}
+
+TEST_CASE("chamber mutations reject a missing origin and CSRF token", "[api]")
+{
+    start_test_server();
+    const char *paths[] = {"/api/target", "/api/control/enable", "/api/control/disable",
+        "/api/control/fan/enable", "/api/control/fan/disable", "/api/fault/acknowledge"};
+    static char request[512], response[RESPONSE_CAPACITY];
+    for (size_t i = 0U; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        snprintf(request, sizeof(request), "%s %s HTTP/1.1\r\nHost: 127.0.0.1:8180\r\n"
+                 "Content-Length: 0\r\nConnection: close\r\n\r\n", i == 0U ? "PUT" : "POST", paths[i]);
+        http_exchange(request, response, sizeof(response));
+        TEST_ASSERT_EQUAL_INT(403, status_code(response));
+    }
+    TEST_ASSERT_EQUAL_INT(0, s_service.set_target_calls);
+    TEST_ASSERT_EQUAL_INT(0, s_service.set_enabled_calls);
+    TEST_ASSERT_EQUAL_INT(0, s_service.set_manual_fan_calls);
+    TEST_ASSERT_EQUAL_INT(0, s_service.ack_calls);
+    TEST_ESP_OK(web_server_stop());
+}
+
+TEST_CASE("an incomplete target body times out and releases HTTP service", "[api]")
+{
+    start_test_server();
+    const char *request = request_with_body("PUT", "/api/target", "{\"target_c\":60}");
+    const size_t headers = (size_t) (strstr(request, "\r\n\r\n") + 4 - request);
+    const int sock = connect_local();
+    const struct timeval timeout = {.tv_sec = 8, .tv_usec = 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    TEST_ASSERT_EQUAL_INT((int) headers, send(sock, request, headers, 0));
+    static char response[RESPONSE_CAPACITY];
+    size_t total = 0U;
+    while (total + 1U < sizeof(response)) {
+        const int n = recv(sock, response + total, sizeof(response) - total - 1U, 0);
+        if (n <= 0) break;
+        total += (size_t) n;
+        response[total] = 0;
+        if (strstr(response, "\r\n\r\n")) break;
+    }
+    response[total] = 0;
+    TEST_ASSERT_EQUAL_INT(408, status_code(response));
+    TEST_ASSERT_EQUAL_INT(0, s_service.set_target_calls);
+    /* Keep the stalled client open: the server must close it rather than
+     * resume draining its unread body before servicing this next request. */
+    http_exchange("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:8180\r\n"
+                  "Connection: close\r\n\r\n", response, sizeof(response));
+    TEST_ASSERT_EQUAL_INT(200, status_code(response));
+    close(sock);
     TEST_ESP_OK(web_server_stop());
 }
 
@@ -337,6 +416,8 @@ TEST_CASE("enable and disable pass through when preconditions hold", "[api]")
     TEST_ASSERT_EQUAL_INT(2, s_service.set_enabled_calls);
     TEST_ASSERT_FALSE(s_service.last_enabled);
 
+    TEST_ASSERT_EQUAL_INT(1,s_service.printer_stop_calls);
+
     TEST_ESP_OK(web_server_stop());
 }
 
@@ -378,6 +459,7 @@ TEST_CASE("manual fan enable and disable reach the runtime", "[api]")
 TEST_CASE("an sse client receives a complete status event", "[api]")
 {
     start_test_server();
+    s_service.status.uptime_ms = 123456U;
 
     const int sock = connect_local();
     static const char k_request[] =
@@ -407,12 +489,13 @@ TEST_CASE("an sse client receives a complete status event", "[api]")
     const char *event = strstr(buffer, "event: status\ndata: ");
     TEST_ASSERT_NOT_NULL(event);
     TEST_ASSERT_NOT_NULL(strstr(event, "\"state\":\"idle\""));
+    TEST_ASSERT_NOT_NULL(strstr(event, "\"uptime_ms\":123456"));
     TEST_ASSERT_NOT_NULL(strstr(event, "\n\n"));
 
     TEST_ESP_OK(web_server_stop());
 }
 
-TEST_CASE("event streams are capped at four clients", "[api]")
+TEST_CASE("printer routes coexist with four SSE clients", "[api][printer_api]")
 {
     start_test_server();
 
@@ -431,6 +514,19 @@ TEST_CASE("event streams are capped at four clients", "[api]")
     TEST_ASSERT_EQUAL_INT(200,status_code(response));
     http_exchange("GET /api/firmware HTTP/1.1\r\nHost: 127.0.0.1:8180\r\nConnection: close\r\n\r\n",response,sizeof(response));
     TEST_ASSERT_EQUAL_INT(200,status_code(response));
+    http_exchange("GET /api/printer HTTP/1.1\r\nHost: 127.0.0.1:8180\r\nConnection: close\r\n\r\n",response,sizeof(response));
+    TEST_ASSERT_EQUAL_INT(200,status_code(response));
+    cJSON *root=cJSON_Parse(strstr(response,"\r\n\r\n")+4);TEST_ASSERT_NOT_NULL(root);
+    char token[33];strcpy(token,cJSON_GetObjectItem(root,"csrf_token")->valuestring);cJSON_Delete(root);
+    static char request[512];
+    const char *body="{\"arm_token\":\"0123456789abcdef0123456789abcdef\",\"initial_pause_confirmed\":true}";
+    snprintf(request,sizeof(request),"POST /api/printer/cycle HTTP/1.1\r\nHost: 127.0.0.1:8180\r\nOrigin: http://127.0.0.1:8180\r\nX-P1S-CSRF: %s\r\nContent-Type: application/json\r\nContent-Length: %u\r\nConnection: close\r\n\r\n%s",token,(unsigned)strlen(body),body);
+    http_exchange(request,response,sizeof(response));TEST_ASSERT_EQUAL_INT(202,status_code(response));
+    http_exchange(request,response,sizeof(response));TEST_ASSERT_EQUAL_INT(409,status_code(response));
+    TEST_ASSERT_EQUAL_INT(2,s_service.printer_arm_calls);
+    snprintf(request,sizeof(request),"POST /api/printer/cycle/stop HTTP/1.1\r\nHost: 127.0.0.1:8180\r\nOrigin: http://127.0.0.1:8180\r\nX-P1S-CSRF: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",token);
+    http_exchange(request,response,sizeof(response));TEST_ASSERT_EQUAL_INT(204,status_code(response));
+    TEST_ASSERT_EQUAL_INT(1,s_service.printer_stop_calls);
     http_exchange(k_request, response, sizeof(response));
     TEST_ASSERT_EQUAL_INT(503, status_code(response));
 
