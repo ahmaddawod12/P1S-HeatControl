@@ -55,8 +55,12 @@ source repository and derives its target commit from a clean local HEAD.
 **Files:** Approved working-tree firmware changes and release documentation.
 
 - [x] Check the full source change and verify private artifacts stay excluded.
-- [ ] Rebuild the clean committed source and require its payload to match the public package; reject existing remote version tags.
-- [ ] Commit and push the matching source revision on the existing branch.
-- [ ] Publish v1.0.0 to the public source repo with that exact target commit.
-- [ ] Verify anonymous latest-release metadata and both downloadable assets.
-- [ ] Summarize the release URL, relay mapping and one-time USB transition.
+- [x] Rebuild the clean committed source and require its payload to match the public package; reject existing remote version tags.
+- [x] Commit and push the matching source revision on the existing branch.
+- [x] Publish v1.0.0 to the public source repo with that exact target commit.
+- [x] Verify anonymous latest-release metadata and both downloadable assets.
+- [x] Summarize the release URL, relay mapping and one-time USB transition.
+
+**Result:** [Published v1.0.0](https://github.com/ahmaddawod12/P1S-HeatControl/releases/tag/v1.0.0),
+source `6a3a3bc6ecb675a5d379eee696cbf7eb763bebd5`.
+See `docs/releases/v1.0.0-verification.md` for the measured software checks.
