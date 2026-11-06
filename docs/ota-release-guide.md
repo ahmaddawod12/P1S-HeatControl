@@ -1,15 +1,20 @@
 # OTA setup and releases
 
 The dashboard updates classic ESP32-WROOM-32 controllers with 4 MB flash and
-active-low GPIO25/GPIO26 relays. Firmware is downloaded directly by the board
-from `ahmaddawod12/P1S-HeatControl-Releases`. The source stays in the private
-`ahmaddawod12/P1S-HeatControl` repository. The public test repository now exists:
-1.0.1 and 1.0.2 are prereleases retained with known-issue notes. Corrected 1.0.3
-and 1.0.4 are the approved public commissioning releases; 1.0.4 is latest.
-Both slot directions, interrupted downloads, a physical USB power cut,
-unconfirmed-boot rollback, startup watchdog recovery and HTTP health timeout
-have passed on the board. Remaining physical commissioning checks are recorded
-in the implementation status.
+active-high GPIO16/GPIO17 relays: OFF is LOW, ON is HIGH, and both relays start
+OFF. Source and signed releases share the public
+[`ahmaddawod12/P1S-HeatControl`](https://github.com/ahmaddawod12/P1S-HeatControl)
+repository. Version **1.0.0** starts this release series.
+
+Earlier development firmware, including 1.0.5, points to the former
+`P1S-HeatControl-Releases` repository and refuses an older version. Install this
+1.0.0 baseline over USB once to adopt the new repository and relay polarity.
+Keep the normal OTA version checks enabled. Future updates must increase the
+version and retain the selected hardware profile.
+
+Earlier commissioning results in the [implementation status](ota-implementation-status.md)
+are historical evidence for the previous builds. Physical relay and OTA
+commissioning of this reset baseline remains a separate check.
 
 ## One-time USB setup
 
@@ -22,14 +27,13 @@ device configuration/OTA metadata area before installing the new layout.
 Use an activated ESP-IDF **v6.1** PowerShell environment. `python` must be its
 Python environment, with `espsecure` and `esptool` available. Create the ignored
 `sdkconfig.secret` as described in the README. The private ECDSA signing key
-must stay outside this checkout. For this workspace it was created at
-`C:/Users/dawud/.p1s-heat/ota_signing_private.pem`; back it up securely. Losing
+must stay outside this checkout; back it up securely. Losing
 that key prevents signing updates trusted by the installed firmware. Only the
 raw public key, `config/ota_signing_public.bin`, belongs in Git.
 
 ```powershell
 idf.py -B build-bootstrap -D SDKCONFIG=sdkconfig.bootstrap -D P1S_BOOTSTRAP_CREDENTIALS=ON build
-$p1sKey = 'C:/Users/dawud/.p1s-heat/ota_signing_private.pem'
+$p1sKey = 'C:/path/outside-checkout/ota_signing_private.pem'
 ./tools/install_bootstrap.ps1 -BuildDir build-bootstrap -PrivateKey $p1sKey
 ```
 
@@ -66,6 +70,10 @@ with that record can leave maintenance without needing the router.
 Increase `version.txt` using stable `major.minor.patch` versions. Keep the board,
 layout, relay polarity and trust key compatible. Use separate build/config
 paths so personal credentials cannot contaminate the release configuration.
+When reusing older build directories, select active-high relays and set
+`CONFIG_P1S_RELEASE_REPOSITORY="ahmaddawod12/P1S-HeatControl"` in their
+sdkconfig files; defaults do not replace saved selections.
+Commit and push the intended source revision before the final build and signing.
 
 ```powershell
 $p1sVersion = (Get-Content version.txt -Raw).Trim()
@@ -75,16 +83,32 @@ python tools/package_firmware.py --build-dir build-release --public-key config/o
 ./tools/publish_firmware.ps1 -PackageDir "dist/firmware-$p1sVersion" -Version $p1sVersion
 ```
 
-The publisher defaults to a dry run. Inspect the concrete package and notes
-before the first public publication. Add `-Publish` when approved; the tool
-creates the separate public repository if missing and uploads exactly:
+The publisher defaults to a local dry run. Review the concrete package and
+`docs/releases/v<version>.md` when present; otherwise it uses generic release
+notes. Commit the source used for the build and push that commit to this
+repository before adding `-Publish`:
+
+```powershell
+git push origin HEAD
+./tools/publish_firmware.ps1 -PackageDir "dist/firmware-$p1sVersion" -Version $p1sVersion -Publish
+```
+
+Publication requires a clean source tree and an existing public repository with
+source history. The release tag targets the exact local HEAD commit. The tool
+does not create a repository, initialize history or change visibility. It
+refuses any existing version tag, rebuilds the committed source using ESP-IDF,
+and checks that the signed package payload matches that application. Use
+`-BuildDir` if the generic build directory is not `build-release`. A stale
+package must be signed and packaged again from the rebuilt output. It uploads
+exactly:
 
 - `p1s-heat-controller-esp32-4mb.bin`: signed application only, at most `0x1F0000` bytes.
 - `firmware.json`: format, product, hardware, layout, version, filename, full
   signed-file size and SHA-256 digest.
 
-No source history, personal bootstrap, SDK configuration, key or flash backup is
-uploaded. Existing release tags are not overwritten. Publish normal stable
+Personal bootstraps, SDK configurations, keys and flash backups stay local.
+GitHub also provides source archives for the tagged public commit. Existing
+release tags are not overwritten. Publish normal stable
 releases: drafts and prereleases do not become the device's latest release.
 The package validator checks the real ECDSA signature, signed identity, ESP32
 header/application descriptor, version, partition table and generic build
@@ -92,15 +116,15 @@ configuration. Signed descriptor format 2 also records bootstrap purpose and
 compiled credential presence; public packaging and device OTA reject either
 flag. Packaging matches the signed payload to that build's application output,
 and publication rechecks the signed purpose independently of build metadata.
-New or empty distribution repositories are initialized with a public README
-only, providing a commit for the release tag. Changing the release repository
-requires updating the fixed
-device configuration before installing the bootstrap.
+Both generic and personal validation require the current update repository and
+active-high profile, so an older saved sdkconfig cannot silently select them.
+Changing the release repository requires updating the fixed device
+configuration before installing the bootstrap.
 
 After publication, verify that GitHub's latest-release metadata and both asset
 download URLs work anonymously. No GitHub token belongs on the controller.
-Compiled firmware is public and can be inspected even though source stays
-private. This signing scheme authenticates OTA images; hardware secure boot is
+Source and compiled generic firmware are public. This signing scheme
+authenticates OTA images; hardware secure boot is
 not enabled.
 
 ## Dashboard behavior and recovery
@@ -122,9 +146,9 @@ retried automatically. A failed safe-off acknowledgement keeps maintenance
 latched and requires diagnosis.
 
 Keep USB accessible until the unloaded-relay tests in the commissioning
-checklist pass. The current commissioning sequence is `1.0.0 → 1.0.3 → 1.0.4`,
-covering both slot directions. Exercise
+checklist pass. The earlier `1.0.0 → 1.0.3 → 1.0.4` sequence used the former
+repository and hardware profile. Commission the new baseline separately and exercise
 interrupted downloads/power, bad signatures, startup stalls, rollback, saved
 settings and dashboard recovery. A build or host test does not demonstrate
-these physical results. See the [current implementation and test status](ota-implementation-status.md)
-for completed on-board checks, pending OTA tests and the private settings backup.
+these physical results. See the [historical implementation and test status](ota-implementation-status.md)
+for earlier on-board checks, pending OTA tests and the private settings backup.

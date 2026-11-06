@@ -117,6 +117,8 @@ input[type="number"] {
 }
 
 .hint { margin: 0.75rem 0 0; font-size: 0.85rem; color: var(--muted); }
+.calibration-label { display: block; margin-bottom: 0.5rem; }
+#calibration-offset { min-height: 44px; }
 
 .warning {
   margin: 0.75rem 0 0;

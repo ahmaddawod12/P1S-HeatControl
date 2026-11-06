@@ -23,6 +23,9 @@ typedef struct {
 
 void temperature_monitor_init(temperature_monitor_t *monitor,
                               float calibration_offset_c);
+/* Rebase existing readings without changing their age, validity or fault. */
+bool temperature_monitor_set_calibration(temperature_monitor_t *monitor,
+                                         float calibration_offset_c);
 void temperature_monitor_push(temperature_monitor_t *monitor,
                               float raw_temperature_c,
                               temperature_sensor_fault_t sensor_fault,

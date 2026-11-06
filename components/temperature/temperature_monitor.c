@@ -59,6 +59,21 @@ void temperature_monitor_init(temperature_monitor_t *monitor,
     monitor->fault = HEAT_FAULT_SENSOR_INVALID;
 }
 
+bool temperature_monitor_set_calibration(temperature_monitor_t *monitor,
+                                         float calibration_offset_c)
+{
+    if (monitor == NULL || !isfinite(calibration_offset_c)) {
+        return false;
+    }
+    const float delta = calibration_offset_c - monitor->calibration_offset_c;
+    for (size_t i = 0U; i < monitor->count; ++i) {
+        monitor->window[i] += delta;
+    }
+    monitor->last_raw_c += delta;
+    monitor->calibration_offset_c = calibration_offset_c;
+    return true;
+}
+
 void temperature_monitor_push(temperature_monitor_t *monitor,
                               float raw_temperature_c,
                               temperature_sensor_fault_t sensor_fault,

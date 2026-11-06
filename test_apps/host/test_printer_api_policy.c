@@ -2,6 +2,7 @@
 #include "firmware_api.h"
 #include "printer_api.h"
 #include "printer_api_policy.h"
+#include "lwip/sockets.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@ static httpd_uri_t routes[5];
 static unsigned route_count, arm_calls, stop_calls, config_calls;
 static const char *input, *type = "application/json";
 static bool trusted = true;
+static bool connection_closed;
 static char status_line[64], response[2048];
 static unsigned allocation, fail_allocation, live_allocations;
 static void *limited_malloc(size_t n) {
@@ -59,7 +61,8 @@ esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *v) {
 }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *key, const char *v) {
   (void)r;
-  assert(!strcmp(key, "Cache-Control") && !strcmp(v, "no-store"));
+  if (!strcmp(key,"Connection") && !strcmp(v,"close"))connection_closed=true;
+  else assert(!strcmp(key, "Cache-Control") && !strcmp(v, "no-store"));
   return ESP_OK;
 }
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *v) {
@@ -92,6 +95,16 @@ int httpd_req_recv(httpd_req_t *r, char *out, size_t n) {
   input += n;
   return (int)n;
 }
+int64_t esp_timer_get_time(void) { return 0; }
+int httpd_req_to_sockfd(httpd_req_t *r) { (void)r;return 7; }
+int getsockopt(int fd,int level,int option,void *value,socklen_t *size) {
+  assert(fd==7 && level==SOL_SOCKET && option==SO_RCVTIMEO && *size==sizeof(struct timeval));
+  *(struct timeval *)value=(struct timeval){.tv_sec=5};return 0;
+}
+int setsockopt(int fd,int level,int option,const void *value,socklen_t size) {
+  assert(fd==7 && level==SOL_SOCKET && option==SO_RCVTIMEO && value && size==sizeof(struct timeval));
+  return 0;
+}
 bool firmware_api_request_trusted(httpd_req_t *r) {
   (void)r;
   return trusted;
@@ -119,8 +132,11 @@ static void request(httpd_method_t method, const char *path, const char *body,
   for (unsigned i = 0; i < route_count; ++i)
     if (routes[i].method == method && !strcmp(path, routes[i].uri)) {
       input = body;
+      connection_closed = false;
       httpd_req_t r = {.content_len = strlen(body), .method = method};
-      assert(routes[i].handler(&r) == ESP_OK);
+      const esp_err_t result=routes[i].handler(&r);
+      assert(result==(connection_closed?ESP_FAIL:ESP_OK));
+      if(expected==403 || (expected==400 && strcmp(type,"application/json")))assert(connection_closed);
       assert(atoi(status_line) == expected);
       return;
     }

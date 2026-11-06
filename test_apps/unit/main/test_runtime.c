@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "settings.h"
 #include "unity.h"
 
 #define WAIT_FOR(condition, timeout_ms)                                       \
@@ -81,10 +82,17 @@ static esp_err_t fake_save_target(float target_c, void *ctx)
     return ESP_OK;
 }
 
+static esp_err_t fake_save_calibration(float calibration_offset_c, void *ctx)
+{
+    (void) ctx;
+    return settings_set_calibration(calibration_offset_c);
+}
+
 static const app_runtime_ops_t k_fake_ops = {
     .read_sensor = fake_read_sensor,
     .set_outputs = fake_set_outputs,
     .save_target = fake_save_target,
+    .save_calibration = fake_save_calibration,
     .ctx = NULL,
 };
 
@@ -439,6 +447,18 @@ TEST_CASE("a reported startup fault latches with outputs off", "[runtime]")
     TEST_ASSERT_EQUAL(HEAT_FAULT_NONE, status_now().fault);
     TEST_ASSERT_FALSE(status_now().enabled);
 
+    app_runtime_stop();
+}
+
+TEST_CASE("output initialization fault acknowledgement is refused", "[runtime]")
+{
+    start_ready_runtime(25.0f);
+    TEST_ESP_OK(app_runtime_report_startup_fault(HEAT_FAULT_OUTPUT_INIT));
+    WAIT_FOR(state_is(HEAT_STATE_FAULT), 2000);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, app_runtime_ack_fault());
+    TEST_ASSERT_EQUAL(HEAT_FAULT_OUTPUT_INIT, status_now().fault);
+    TEST_ASSERT_FALSE(status_now().enabled);
+    TEST_ASSERT_FALSE(fake_heater_on());
     app_runtime_stop();
 }
 

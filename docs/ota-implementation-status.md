@@ -1,5 +1,12 @@
 # OTA implementation and board test status
 
+**Historical record:** This document describes the earlier commissioning builds
+and separate distribution repository. The 2026-11-07 public source release
+resets the version to 1.0.0, uses active-high relays and publishes from
+`ahmaddawod12/P1S-HeatControl`. Follow the
+[current release guide](ota-release-guide.md). Earlier physical results below
+do not establish commissioning of the new baseline.
+
 Implemented on `feature/p1s-heat-controller`. The owner resumed hardware testing
 and confirmed both relay loads disconnected. The ESP32-D0WD-V3 / 4 MB board is
 connected on COM3 at `10.0.0.31`. Signed USB setup, a live GitHub OTA installation,
@@ -213,4 +220,5 @@ outside the checkout before generated build/test directories were removed.
 Keep that local archive for outstanding commissioning checks. Private fault
 fixtures are named `LOCAL_*`; no test hook is present in tracked product code
 or public 1.0.4. Regenerate `build-release/` for normal public packaging.
-Keep source, personal builds/backups and the private signing key private.
+Keep personal builds/backups and the private signing key private. Source is
+public under the current release policy.

@@ -21,6 +21,8 @@ const char *api_fault_name(heat_fault_t fault);
  * heat_target_is_valid(). Returns ESP_ERR_INVALID_SIZE for bodies past
  * API_MAX_BODY_BYTES and leaves *out_target untouched on any failure. */
 esp_err_t api_parse_target(const char *body, float *out_target);
+/* Exactly one finite numeric calibration_offset_c in the saved ±10 °C range. */
+esp_err_t api_parse_calibration(const char *body, float *out_offset);
 
 esp_err_t api_status_json(const app_status_t *status,
                           char *out_json,

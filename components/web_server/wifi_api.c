@@ -1,6 +1,7 @@
 #include "wifi_api.h"
 #include "wifi_api_policy.h"
 #include "firmware_api.h"
+#include "http_request.h"
 #include "cJSON.h"
 #include <string.h>
 
@@ -13,6 +14,7 @@ static esp_err_t respond(httpd_req_t *req,const char *status,const char *body)
 }
 static esp_err_t get_wifi(httpd_req_t *req)
 {
+    if (!http_request_require_empty_body(req)) return ESP_FAIL;
     if (!s_ops.get_wifi_status) return respond(req,"503 Service Unavailable","{\"error\":\"unavailable\"}");
     wifi_manager_status_t s; s_ops.get_wifi_status(&s);
     cJSON *root=cJSON_CreateObject();
@@ -38,22 +40,22 @@ static esp_err_t get_wifi(httpd_req_t *req)
 }
 static esp_err_t save_wifi(httpd_req_t *req)
 {
-    if (!firmware_api_request_trusted(req)) return respond(req,"403 Forbidden","{\"error\":\"request_origin\"}");
+    if (!firmware_api_request_trusted(req)) return http_request_close_json(req,"403 Forbidden","{\"error\":\"request_origin\"}");
     char type[64];
     const size_t type_length=httpd_req_get_hdr_value_len(req,"Content-Type");
     if (!type_length || type_length>=sizeof(type) ||
         httpd_req_get_hdr_value_str(req,"Content-Type",type,sizeof(type))!=ESP_OK ||
         (strcmp(type,"application/json")!=0 && strncmp(type,"application/json;",17)!=0) ||
         !req->content_len || req->content_len>WIFI_API_MAX_BODY)
-        return respond(req,"400 Bad Request","{\"error\":\"invalid_body\"}");
-    char body[WIFI_API_MAX_BODY+1]; size_t used=0;
-    while (used<req->content_len) {
-        const int count=httpd_req_recv(req,body+used,req->content_len-used);
-        if (count<=0) return respond(req,"408 Request Timeout","{\"error\":\"body_timeout\"}");
-        used+=(size_t)count;
-    }
+        return http_request_close_json(req,"400 Bad Request","{\"error\":\"invalid_body\"}");
+    char body[WIFI_API_MAX_BODY+1];
+    const esp_err_t read_err=http_request_receive_body(req,body,sizeof(body));
+    if (read_err==ESP_ERR_TIMEOUT)
+        return http_request_close_json(req,"408 Request Timeout","{\"error\":\"body_timeout\"}");
+    if (read_err!=ESP_OK)
+        return http_request_close_json(req,"400 Bad Request","{\"error\":\"invalid_body\"}");
     wifi_credentials_t credentials;
-    if (!wifi_request_parse(body,used,&credentials)) return respond(req,"400 Bad Request","{\"error\":\"invalid_body\"}");
+    if (!wifi_request_parse(body,req->content_len,&credentials)) return respond(req,"400 Bad Request","{\"error\":\"invalid_body\"}");
     if (!s_ops.request_wifi_change) return respond(req,"503 Service Unavailable","{\"error\":\"unavailable\"}");
     const esp_err_t err=s_ops.request_wifi_change(&credentials);
     if (err==ESP_OK) return respond(req,"202 Accepted","{\"accepted\":true}");

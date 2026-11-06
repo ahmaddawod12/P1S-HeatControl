@@ -4,6 +4,7 @@
 #include "esp_timer.h"
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -11,6 +12,11 @@
 
 struct host_semaphore { pthread_mutex_t lock; pthread_cond_t changed; unsigned count; };
 struct host_queue { pthread_mutex_t lock; pthread_cond_t changed; unsigned capacity, size, count; unsigned char *data; };
+static atomic_bool pause_control_queue, control_queue_paused;
+static atomic_bool early_reply_timeout;
+void host_control_queue_pause(bool paused) { atomic_store(&pause_control_queue, paused); }
+bool host_control_queue_is_paused(void) { return atomic_load(&control_queue_paused); }
+void host_reply_queue_timeout_early(void) { atomic_store(&early_reply_timeout, true); }
 static struct timespec deadline(TickType_t ticks)
 {
     struct timespec t; timespec_get(&t, TIME_UTC);
@@ -29,6 +35,11 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void)
 }
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
 { SemaphoreHandle_t s = xSemaphoreCreateBinary(); if (s) s->count = 1; return s; }
+SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *storage)
+{
+    if (!storage->handle) storage->handle = xSemaphoreCreateMutex();
+    return storage->handle;
+}
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
 {
     const struct timespec until = deadline(ticks);
@@ -60,6 +71,12 @@ BaseType_t xQueueSend(QueueHandle_t q, const void *item, TickType_t ticks)
 }
 static BaseType_t receive(QueueHandle_t q, void *item, TickType_t ticks, bool pop)
 {
+    if (pop && q->capacity == 1 && atomic_exchange(&early_reply_timeout, false)) return pdFALSE;
+    if (pop && q->capacity == 8 && atomic_load(&pause_control_queue)) {
+        atomic_store(&control_queue_paused, true);
+        while (atomic_load(&pause_control_queue)) Sleep(1);
+        atomic_store(&control_queue_paused, false);
+    }
     const struct timespec until = deadline(ticks); pthread_mutex_lock(&q->lock);
     while (!q->count) if (!ticks || wait(&q->changed, &q->lock, ticks, &until)) {
         pthread_mutex_unlock(&q->lock); return pdFALSE;

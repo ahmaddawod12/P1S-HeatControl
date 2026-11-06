@@ -1,6 +1,7 @@
 #include "printer_api.h"
 #include "cJSON.h"
 #include "firmware_api.h"
+#include "http_request.h"
 #include "printer_api_policy.h"
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,7 @@ static esp_err_t result(httpd_req_t *req, esp_err_t err, bool accepted) {
                   "{\"error\":\"unavailable\"}");
 }
 static esp_err_t get_printer(httpd_req_t *req) {
+  if (!http_request_require_empty_body(req)) return ESP_FAIL;
   if (!s_ops.get_printer_status)
     return result(req, ESP_ERR_INVALID_STATE, false);
   printer_control_status_t *s = calloc(1, sizeof(*s));
@@ -56,9 +58,9 @@ static esp_err_t get_printer(httpd_req_t *req) {
   free(s);
   return sent;
 }
-static bool read_body(httpd_req_t *req, char **out) {
+static esp_err_t read_body(httpd_req_t *req, char **out) {
   if (req->content_len > PRINTER_API_MAX_BODY)
-    return false;
+    return ESP_ERR_INVALID_SIZE;
   if (req->content_len) {
     char type[64];
     size_t n = httpd_req_get_hdr_value_len(req, "Content-Type");
@@ -67,31 +69,32 @@ static bool read_body(httpd_req_t *req, char **out) {
             ESP_OK ||
         (strcmp(type, "application/json") &&
          strncmp(type, "application/json;", 17)))
-      return false;
+      return ESP_ERR_INVALID_ARG;
   }
   char *body = malloc(req->content_len + 1);
   if (!body)
-    return false;
-  size_t used = 0;
-  while (used < req->content_len) {
-    int n = httpd_req_recv(req, body + used, req->content_len - used);
-    if (n <= 0) {
-      free(body);
-      return false;
-    }
-    used += (size_t)n;
+    return ESP_ERR_NO_MEM;
+  const esp_err_t err = http_request_receive_body(req, body, req->content_len + 1);
+  if (err != ESP_OK) {
+    memset(body, 0, req->content_len);
+    free(body);
+    return err;
   }
-  body[used] = 0;
   *out = body;
-  return true;
+  return ESP_OK;
 }
 enum { CONFIG_SAVE, CONFIG_FORGET, CYCLE_ARM, CYCLE_STOP };
 static esp_err_t mutate(httpd_req_t *req, unsigned operation) {
   if (!firmware_api_request_trusted(req))
-    return response(req, "403 Forbidden", "{\"error\":\"request_origin\"}");
+    return http_request_close_json(req, "403 Forbidden", "{\"error\":\"request_origin\"}");
   char *body = NULL;
-  if (!read_body(req, &body))
-    return result(req, ESP_ERR_INVALID_ARG, false);
+  const esp_err_t read_err = read_body(req, &body);
+  if (read_err == ESP_ERR_TIMEOUT)
+    return http_request_close_json(req, "408 Request Timeout", "{\"error\":\"body_timeout\"}");
+  if (read_err == ESP_ERR_NO_MEM)
+    return http_request_close_json(req, "503 Service Unavailable", "{\"error\":\"unavailable\"}");
+  if (read_err != ESP_OK)
+    return http_request_close_json(req, "400 Bad Request", "{\"error\":\"invalid_body\"}");
   esp_err_t err = ESP_ERR_INVALID_ARG;
   if (operation == CONFIG_SAVE) {
     printer_config_request_t request;

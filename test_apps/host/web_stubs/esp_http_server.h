@@ -1,4 +1,6 @@
 #pragma once
+#include <stdbool.h>
+#include <stdint.h>
 #include "../printer_stubs/esp_http_server.h"
 typedef struct {
     uint16_t server_port;

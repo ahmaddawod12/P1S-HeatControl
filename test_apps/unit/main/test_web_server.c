@@ -20,6 +20,8 @@
 typedef struct {
     app_status_t status;
     int set_target_calls;
+    int set_calibration_calls;
+    float last_calibration;
     float last_target;
     int set_enabled_calls;
     bool last_enabled;
@@ -54,6 +56,13 @@ static esp_err_t fake_set_enabled(bool enabled)
 {
     ++s_service.set_enabled_calls;
     s_service.last_enabled = enabled;
+    return s_service.command_result;
+}
+
+static esp_err_t fake_set_calibration(float calibration_offset_c)
+{
+    ++s_service.set_calibration_calls;
+    s_service.last_calibration = calibration_offset_c;
     return s_service.command_result;
 }
 
@@ -113,6 +122,7 @@ static void start_test_server(void)
         .ops = {
             .get_status = fake_get_status,
             .set_target = fake_set_target,
+            .set_calibration = fake_set_calibration,
             .set_enabled = fake_set_enabled,
             .set_manual_fan = fake_set_manual_fan,
             .ack_fault = fake_ack_fault,

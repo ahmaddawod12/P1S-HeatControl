@@ -2,11 +2,10 @@ menu "P1S Heat Controller Board"
 
 config P1S_RELAY_ACTIVE_LOW
     bool "Relay channels are active low"
-    default y
+    default n
     help
-        Most two-channel opto-isolated relay boards energize a channel when its
-        control input is driven low. Keep this enabled for those boards so the
-        pins idle inactive through reset. Disable it only for relay boards that
-        energize on a high input.
+        Enable for relay boards that energize when the control input is low.
+        The default is active high: LOW is off and HIGH is on. Both channels
+        initialize at the inactive level before their output drivers are enabled.
 
 endmenu

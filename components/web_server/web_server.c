@@ -9,7 +9,7 @@
 #include "diagnostics.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "http_request.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sse_hub.h"
@@ -26,7 +26,6 @@
 #define KEEPALIVE_PERIOD_MS 15000U
 #define BROADCAST_TASK_STACK 4096
 #define BROADCAST_TASK_PRIORITY 4
-#define BODY_RECEIVE_DEADLINE_US 5000000LL
 
 static const char *TAG = "web";
 
@@ -76,9 +75,10 @@ static esp_err_t send_error(httpd_req_t *req,
 static esp_err_t close_with_error(httpd_req_t *req, const char *status_line,
                                   const char *code, const char *message)
 {
-    httpd_resp_set_hdr(req, "Connection", "close");
-    (void) send_error(req, status_line, code, message);
-    return ESP_FAIL;
+    char json[160];
+    if (api_error_json(code, message, json, sizeof(json)) != ESP_OK)
+        return http_request_close_json(req, status_line, "{\"error\":\"internal\"}");
+    return http_request_close_json(req, status_line, json);
 }
 
 static bool chamber_request_trusted(httpd_req_t *req, bool allow_body)
@@ -125,38 +125,9 @@ static esp_err_t send_command_result(httpd_req_t *req, esp_err_t result)
     }
 }
 
-/* Reads a bounded body. Returns ESP_ERR_INVALID_SIZE past API_MAX_BODY_BYTES
- * so an oversized body is rejected rather than silently truncated. */
-static esp_err_t receive_body(httpd_req_t *req, char *buffer, size_t capacity)
-{
-    if (req->content_len == 0U) {
-        buffer[0] = '\0';
-        return ESP_OK;
-    }
-    if (req->content_len >= capacity) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    size_t received = 0U;
-    const int64_t deadline = esp_timer_get_time() + BODY_RECEIVE_DEADLINE_US;
-    while (received < req->content_len) {
-        if (esp_timer_get_time() >= deadline) return ESP_ERR_TIMEOUT;
-        const int chunk = httpd_req_recv(req, &buffer[received],
-                                         req->content_len - received);
-        if (chunk == HTTPD_SOCK_ERR_TIMEOUT || esp_timer_get_time() >= deadline)
-            return ESP_ERR_TIMEOUT;
-        if (chunk <= 0) {
-            return ESP_FAIL;
-        }
-        received += (size_t) chunk;
-    }
-    if (memchr(buffer, '\0', received) != NULL) return ESP_ERR_INVALID_ARG;
-    buffer[received] = '\0';
-    return ESP_OK;
-}
-
 static esp_err_t status_handler(httpd_req_t *req)
 {
+    if (!http_request_require_empty_body(req)) return ESP_FAIL;
     app_status_t status;
     s_ops.get_status(&status);
 
@@ -170,6 +141,7 @@ static esp_err_t status_handler(httpd_req_t *req)
 
 static esp_err_t diagnostics_handler(httpd_req_t *req)
 {
+    if (!http_request_require_empty_body(req)) return ESP_FAIL;
     // Keep the ring and JSON off the HTTP task's stack.
     typedef struct {
         diagnostic_record_t records[DIAGNOSTICS_CAPACITY];
@@ -195,11 +167,11 @@ static esp_err_t diagnostics_handler(httpd_req_t *req)
     return err;
 }
 
-static esp_err_t target_handler(httpd_req_t *req)
+static esp_err_t setting_handler(httpd_req_t *req, bool target)
 {
     if (!chamber_request_trusted(req, true)) return ESP_FAIL;
     char body[API_MAX_BODY_BYTES + 1U];
-    const esp_err_t read_err = receive_body(req, body, sizeof(body));
+    const esp_err_t read_err = http_request_receive_body(req, body, sizeof(body));
     if (read_err == ESP_ERR_TIMEOUT) {
         return close_with_error(req, "408 Request Timeout", "body_timeout",
                           "the request body did not arrive in time");
@@ -213,12 +185,24 @@ static esp_err_t target_handler(httpd_req_t *req)
                           "the request body could not be read");
     }
 
-    float target = 0.0f;
-    if (api_parse_target(body, &target) != ESP_OK) {
-        return send_error(req, "400 Bad Request", "invalid_target",
-                          "target_c must be 0 to 80 in 0.5 degree steps");
+    float value = 0.0f;
+    const esp_err_t parse_err = target ? api_parse_target(body, &value) : api_parse_calibration(body, &value);
+    if (parse_err != ESP_OK) {
+        return send_error(req, "400 Bad Request", target ? "invalid_target" : "invalid_calibration",
+                          target ? "target_c must be 0 to 80 in 0.5 degree steps" :
+                          "calibration_offset_c must be a number between -10 and 10");
     }
-    return send_command_result(req, s_ops.set_target(target));
+    return send_command_result(req, target ? s_ops.set_target(value) : s_ops.set_calibration(value));
+}
+
+static esp_err_t target_handler(httpd_req_t *req)
+{
+    return setting_handler(req, true);
+}
+
+static esp_err_t calibration_handler(httpd_req_t *req)
+{
+    return setting_handler(req, false);
 }
 
 /* The controller is authoritative; this precheck exists so the browser gets
@@ -280,7 +264,12 @@ static esp_err_t acknowledge_handler(httpd_req_t *req)
         return send_error(req, "409 Conflict", "no_fault",
                           "no fault is currently latched");
     }
-    return send_command_result(req, s_ops.ack_fault());
+    const esp_err_t result = s_ops.ack_fault();
+    if (result == ESP_ERR_NOT_ALLOWED) {
+        return send_error(req, "409 Conflict", "acknowledge_refused",
+                          "fault recovery requirements are not satisfied");
+    }
+    return send_command_result(req, result);
 }
 
 size_t web_server_asset_length(const char *start, const char *end)
@@ -297,6 +286,7 @@ static esp_err_t send_asset(httpd_req_t *req,
                             const char *end,
                             const char *content_type)
 {
+    if (!http_request_require_empty_body(req)) return ESP_FAIL;
     httpd_resp_set_type(req, content_type);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, start,
@@ -332,6 +322,7 @@ static esp_err_t printer_script_handler(httpd_req_t *req)
 
 static esp_err_t events_handler(httpd_req_t *req)
 {
+    if (!http_request_require_empty_body(req)) return ESP_FAIL;
     const esp_err_t err = sse_hub_add_client(req);
     if (err == ESP_ERR_NO_MEM) {
         return send_error(req, "503 Service Unavailable", "too_many_streams",
@@ -413,6 +404,7 @@ web_server_config_t web_server_default_config(void)
         .ops = {
             .get_status = app_runtime_get_status,
             .set_target = app_runtime_set_target,
+            .set_calibration = app_runtime_set_calibration,
             .set_enabled = app_runtime_set_enabled,
             .set_manual_fan = app_runtime_set_manual_fan,
             .ack_fault = app_runtime_ack_fault,
@@ -433,7 +425,7 @@ web_server_config_t web_server_default_config(void)
 esp_err_t web_server_start(const web_server_config_t *config)
 {
     if (config == NULL || config->ops.get_status == NULL ||
-        config->ops.set_target == NULL || config->ops.set_enabled == NULL ||
+        config->ops.set_target == NULL || config->ops.set_calibration == NULL || config->ops.set_enabled == NULL ||
         config->ops.set_manual_fan == NULL ||
         config->ops.ack_fault == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -464,6 +456,7 @@ esp_err_t web_server_start(const web_server_config_t *config)
         {"/api/status", HTTP_GET, status_handler},
         {"/api/diagnostics", HTTP_GET, diagnostics_handler},
         {"/api/target", HTTP_PUT, target_handler},
+        {"/api/calibration", HTTP_PUT, calibration_handler},
         {"/api/control/enable", HTTP_POST, enable_handler},
         {"/api/control/disable", HTTP_POST, disable_handler},
         {"/api/control/fan/enable", HTTP_POST, manual_fan_enable_handler},

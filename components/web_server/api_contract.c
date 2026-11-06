@@ -5,6 +5,7 @@
 
 #include "cJSON.h"
 #include "heat_controller.h"
+#include "settings.h"
 
 const char *api_state_name(heat_state_t state)
 {
@@ -80,8 +81,8 @@ static esp_err_t print_into(cJSON *root, char *out_json, size_t capacity)
 }
 
 /* Reject recursive values before cJSON can consume the small HTTP task stack.
- * The target contract is a single scalar field, so nesting is never useful. */
-static bool target_body_flat(const char *body, size_t length)
+ * These settings contain a single scalar field, so nesting is never useful. */
+static bool setting_body_flat(const char *body, size_t length)
 {
     bool quoted = false;
     unsigned depth = 0U;
@@ -107,16 +108,16 @@ static bool target_body_flat(const char *body, size_t length)
     return !quoted && depth == 0U;
 }
 
-esp_err_t api_parse_target(const char *body, float *out_target)
+static esp_err_t parse_setting(const char *body, float *out_value, bool target)
 {
-    if (body == NULL || out_target == NULL) {
+    if (body == NULL || out_value == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     const size_t length = strnlen(body, API_MAX_BODY_BYTES + 1U);
     if (length > API_MAX_BODY_BYTES) {
         return ESP_ERR_INVALID_SIZE;
     }
-    if (!target_body_flat(body, length)) return ESP_ERR_INVALID_ARG;
+    if (!setting_body_flat(body, length)) return ESP_ERR_INVALID_ARG;
 
     cJSON *root = cJSON_ParseWithOpts(body, NULL, true);
     if (root == NULL) {
@@ -125,18 +126,31 @@ esp_err_t api_parse_target(const char *body, float *out_target)
 
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (cJSON_IsObject(root) && cJSON_GetArraySize(root) == 1) {
-        const cJSON *target =
-            cJSON_GetObjectItemCaseSensitive(root, "target_c");
-        if (cJSON_IsNumber(target)) {
-            const float value = (float) target->valuedouble;
-            if (heat_target_is_valid(value)) {
-                *out_target = value;
+        const cJSON *number = cJSON_GetObjectItemCaseSensitive(
+            root, target ? "target_c" : "calibration_offset_c");
+        if (cJSON_IsNumber(number)) {
+            const double value = number->valuedouble;
+            const bool valid = target ? heat_target_is_valid((float) value) :
+                (isfinite(value) && value >= SETTINGS_MIN_CALIBRATION_C &&
+                 value <= SETTINGS_MAX_CALIBRATION_C);
+            if (valid) {
+                *out_value = (float) value;
                 err = ESP_OK;
             }
         }
     }
     cJSON_Delete(root);
     return err;
+}
+
+esp_err_t api_parse_target(const char *body, float *out_target)
+{
+    return parse_setting(body, out_target, true);
+}
+
+esp_err_t api_parse_calibration(const char *body, float *out_offset)
+{
+    return parse_setting(body, out_offset, false);
 }
 
 esp_err_t api_status_json(const app_status_t *status,
@@ -159,6 +173,7 @@ esp_err_t api_status_json(const app_status_t *status,
     cJSON_AddBoolToObject(root, "fan_on", status->fan_on);
     cJSON_AddBoolToObject(root, "manual_fan_on", status->manual_fan_on);
     add_number_or_null(root, "target_c", status->target_c);
+    add_number_or_null(root, "calibration_offset_c", status->calibration_offset_c);
     add_number_or_null(root, "raw_c", status->temperature.raw_c);
     add_number_or_null(root, "filtered_c", status->temperature.filtered_c);
     cJSON_AddBoolToObject(root, "valid", status->temperature.valid);

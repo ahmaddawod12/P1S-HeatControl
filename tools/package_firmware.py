@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 IMAGE_NAME = "p1s-heat-controller-esp32-4mb.bin"
+RELEASE_REPOSITORY = "ahmaddawod12/P1S-HeatControl"
 SLOT_BYTES = 0x1F0000
 IDENTITY = struct.Struct("<II24s24s24s32sI")
 PARTITIONS = {
@@ -83,10 +84,11 @@ def validate_generic_build(build, version):
     require(description.get("target") == "esp32" and description.get("project_name") == "p1s_heat_controller"
         and description.get("project_version") == version, "wrong project/target/version")
     config = json.loads((build / "config/sdkconfig.json").read_text(encoding="utf-8"))
+    require(config.get("P1S_RELEASE_REPOSITORY") == RELEASE_REPOSITORY, "wrong release repository")
     require(config.get("P1S_WIFI_SSID") == "" and config.get("P1S_WIFI_PASSWORD") == "",
             "release contains personal Wi-Fi configuration")
     require(config.get("IDF_TARGET") == "esp32" and config.get("ESPTOOLPY_FLASHSIZE") == "4MB"
-        and config.get("P1S_RELAY_ACTIVE_LOW") is True, "wrong hardware profile")
+        and config.get("P1S_RELAY_ACTIVE_LOW") is False, "wrong hardware profile")
     for key in ("BOOTLOADER_APP_ROLLBACK_ENABLE", "SECURE_SIGNED_APPS_NO_SECURE_BOOT", "SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT"):
         require(config.get(key) is True, "required update protection is disabled")
     require(not config.get("SECURE_BOOT") and not config.get("BOOTLOADER_APP_ANTI_ROLLBACK"),
@@ -100,9 +102,10 @@ def validate_bootstrap(build_dir, public_key, version):
     build = Path(build_dir)
     description = json.loads((build / "project_description.json").read_text(encoding="utf-8"))
     config = json.loads((build / "config/sdkconfig.json").read_text(encoding="utf-8"))
+    require(config.get("P1S_RELEASE_REPOSITORY") == RELEASE_REPOSITORY, "wrong bootstrap release repository")
     require(description.get("target") == "esp32" and description.get("project_name") == "p1s_heat_controller"
         and description.get("project_version") == version, "wrong bootstrap project/target/version")
-    require(config.get("ESPTOOLPY_FLASHSIZE") == "4MB" and config.get("P1S_RELAY_ACTIVE_LOW") is True,
+    require(config.get("ESPTOOLPY_FLASHSIZE") == "4MB" and config.get("P1S_RELAY_ACTIVE_LOW") is False,
             "wrong bootstrap hardware profile")
     require(config.get("SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT") is True
         and config.get("BOOTLOADER_APP_ROLLBACK_ENABLE") is True and not config.get("SECURE_BOOT")
@@ -118,20 +121,24 @@ def validate_bootstrap(build_dir, public_key, version):
     validate_build_image(build)
     return image_metadata(build / IMAGE_NAME, public_key, version, personal=True)
 
-def validate_build_image(build):
+def validate_build_image(build, signed_image=None):
     # espsecure v1 appends its 4-byte version and 64-byte ECDSA signature.
-    signed = (build / IMAGE_NAME).read_bytes()
+    signed = (Path(signed_image) if signed_image is not None else build / IMAGE_NAME).read_bytes()
     unsigned = (build / "p1s_heat_controller.bin").read_bytes()
     require(len(signed) >= 68 and signed[:-68] == unsigned,
             "signed firmware does not match this build's application output")
 
-def verify_package(package_dir, public_key, version):
+def verify_package(package_dir, public_key, version, build_dir=None):
     directory = Path(package_dir)
     require(directory.is_dir() and {p.name for p in directory.iterdir()} == {IMAGE_NAME, "firmware.json"},
             "release folder must contain exactly firmware.json and the signed application")
     manifest = json.loads((directory / "firmware.json").read_text(encoding="utf-8"))
     expected = image_metadata(directory / IMAGE_NAME, public_key, version)
     require(manifest == expected, "manifest does not describe the signed image")
+    if build_dir is not None:
+        build = Path(build_dir)
+        validate_generic_build(build, version)
+        validate_build_image(build, directory / IMAGE_NAME)
     return manifest
 
 def package_firmware(build_dir, public_key, output_dir, version):
@@ -162,7 +169,7 @@ def main():
         if args.check_bootstrap:
             manifest = validate_bootstrap(args.check_bootstrap, args.public_key, args.version)
         elif args.verify_package:
-            manifest = verify_package(args.verify_package, args.public_key, args.version)
+            manifest = verify_package(args.verify_package, args.public_key, args.version, args.build_dir)
         else:
             require(args.build_dir is not None and args.output is not None, "build directory and output are required")
             manifest = package_firmware(args.build_dir, args.public_key, args.output, args.version)

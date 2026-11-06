@@ -42,6 +42,7 @@ typedef struct {
     bool fan_on;
     bool manual_fan_on;
     float target_c;
+    float calibration_offset_c;
     temperature_sample_t temperature;
     int8_t wifi_rssi;
     char ip_addr[16];
@@ -58,6 +59,7 @@ static inline app_status_t app_status_initial(void)
         .fan_on = false,
         .manual_fan_on = false,
         .target_c = 60.0f,
+        .calibration_offset_c = 0.0f,
         .temperature = { .valid = false },
         .wifi_rssi = 0,
         .ip_addr = "0.0.0.0",

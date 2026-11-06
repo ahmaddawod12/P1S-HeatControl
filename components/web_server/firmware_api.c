@@ -1,5 +1,6 @@
 #include "firmware_api.h"
 #include "firmware_api_policy.h"
+#include "http_request.h"
 #include "firmware_policy.h"
 #include "cJSON.h"
 #include "esp_random.h"
@@ -18,6 +19,7 @@ static esp_err_t json_response(httpd_req_t *req, const char *status, const char 
 }
 static esp_err_t get_firmware(httpd_req_t *req)
 {
+    if (!http_request_require_empty_body(req)) return ESP_FAIL;
     if (!s_ops.get_firmware_status) return json_response(req, "503 Service Unavailable", "{\"error\":\"unavailable\"}");
     firmware_status_t status; s_ops.get_firmware_status(&status);
     cJSON *root = cJSON_CreateObject();
@@ -71,19 +73,19 @@ bool firmware_api_request_trusted(httpd_req_t *req)
 }
 static esp_err_t request_update(httpd_req_t *req)
 {
-    if (!firmware_api_request_trusted(req)) return json_response(req, "403 Forbidden", "{\"error\":\"request_origin\"}");
+    if (!firmware_api_request_trusted(req)) return http_request_close_json(req, "403 Forbidden", "{\"error\":\"request_origin\"}");
     char type[64];
     if (!header(req, "Content-Type", type, sizeof(type)) ||
         (strcmp(type, "application/json") != 0 && strncmp(type, "application/json;", 17) != 0) ||
         req->content_len < 2 || req->content_len > 64)
-        return json_response(req, "400 Bad Request", "{\"error\":\"invalid_body\"}");
-    char body[65]; size_t received = 0;
-    while (received < req->content_len) {
-        const int count = httpd_req_recv(req, body + received, req->content_len - received);
-        if (count <= 0) return json_response(req, "408 Request Timeout", "{\"error\":\"body_timeout\"}");
-        received += (size_t) count;
-    }
-    if (!firmware_request_body_valid(body, received)) return json_response(req, "400 Bad Request", "{\"error\":\"invalid_body\"}");
+        return http_request_close_json(req, "400 Bad Request", "{\"error\":\"invalid_body\"}");
+    char body[65];
+    const esp_err_t read_err = http_request_receive_body(req, body, sizeof(body));
+    if (read_err == ESP_ERR_TIMEOUT)
+        return http_request_close_json(req, "408 Request Timeout", "{\"error\":\"body_timeout\"}");
+    if (read_err != ESP_OK)
+        return http_request_close_json(req, "400 Bad Request", "{\"error\":\"invalid_body\"}");
+    if (!firmware_request_body_valid(body, req->content_len)) return json_response(req, "400 Bad Request", "{\"error\":\"invalid_body\"}");
     if (!s_ops.request_firmware_update) return json_response(req, "503 Service Unavailable", "{\"error\":\"unavailable\"}");
     const esp_err_t err = s_ops.request_firmware_update();
     if (err == ESP_OK) return json_response(req, "202 Accepted", "{\"accepted\":true}");

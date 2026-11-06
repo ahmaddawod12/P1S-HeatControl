@@ -45,8 +45,8 @@ DS18B20 change; earlier NTC results below are historical, not DS18B20 validation
 | DS18B20 supply / ground | 3.3 V / ESP32 GND |
 | Probe lead colors | Yellow DATA, red VCC, black GND |
 | Cable maximum temperature | 85 °C; route away from the heater |
-| Heater relay output | GPIO25 |
-| Fan relay output | GPIO26 |
+| Heater relay output | GPIO16 |
+| Fan relay output | GPIO17 |
 | Relay polarity (`CONFIG_P1S_RELAY_ACTIVE_LOW`) | |
 | Wi-Fi SSID (`CONFIG_P1S_WIFI_SSID`) | |
 | DS18B20 calibration offset (°C) | Starts at 0 after NTC migration |

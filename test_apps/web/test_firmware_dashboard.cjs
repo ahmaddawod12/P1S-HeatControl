@@ -7,7 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, '../../web/app.js'), 'utf8')
 const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(setImmediate); };
 
 function browser(initial = {}, initialStatus = {}) {
-  const nodes = new Map(), timers = new Map(), calls = [], events = {};
+  const nodes = new Map(), timers = new Map(), calls = [], events = {}, stream = {};
   const element = id => {
     if (!nodes.has(id)) nodes.set(id, { value: '', textContent: '', disabled: false, hidden: false,
       listeners: {}, setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; },
@@ -21,7 +21,7 @@ function browser(initial = {}, initialStatus = {}) {
   const context = {document, console, location: {reload() { reloads++; }},
     setTimeout(fn, delay) { const id = ++sequence; timers.set(id, {fn, delay}); return id; },
     clearTimeout(id) { timers.delete(id); },
-    EventSource: class {addEventListener() {}},
+    EventSource: class {addEventListener(name, fn) {stream[name] = fn;}},
     fetch: async (url, options = {}) => {
       calls.push({url, options});
       if (url === '/api/firmware') {
@@ -34,8 +34,11 @@ function browser(initial = {}, initialStatus = {}) {
       }
       if (options.method && commandFailure) return {ok: false, status: commandFailure,
         json: async () => ({message: 'Command rejected.'})};
+      if (url === '/api/calibration' && options.method === 'PUT') {
+        initialStatus.calibration_offset_c = Math.fround(JSON.parse(options.body).calibration_offset_c);
+      }
       return {ok: true, json: async () => ({state: 'idle', target_c: 60, valid: true,
-        consecutive_valid: 3, enabled: false, heater_on: false, fan_on: false, fault: 'none', ...initialStatus})};
+        calibration_offset_c: 0, consecutive_valid: 3, enabled: false, heater_on: false, fan_on: false, fault: 'none', ...initialStatus})};
     }};
   context.window = context;
   context.addEventListener = (name,fn) => {events[name]=fn;};
@@ -43,11 +46,79 @@ function browser(initial = {}, initialStatus = {}) {
   return {element, calls, printer(detail) {events['p1s-printer-control']({detail});}, get reloads() {return reloads;},
     setFirmware(v) {firmware = {...firmware, ...v};}, offline(v) {offline = v;}, losePost(v) {losePost = v;},
     rejectCommands(status) {commandFailure=status;},
+    editCalibration(value) {element('calibration-offset').value = String(value); element('calibration-offset').listeners.input();},
+    status(detail) {stream.status({data: JSON.stringify({state: 'idle', target_c: 60, valid: true,
+      consecutive_valid: 3, enabled: false, fault: 'none', ...initialStatus, ...detail})});},
     async click() {const button = element('firmware-update-button'); assert.equal(typeof button.listeners.click, 'function'); button.listeners.click(); await flush();},
     async command(id) {element(id).listeners.click(); await flush();},
     async target(value) {element('target-temperature').value = String(value); element('target-temperature').listeners.change(); await flush();},
     async poll() {const entry = [...timers.entries()].at(-1); assert.ok(entry, 'firmware poll is scheduled'); timers.delete(entry[0]); entry[1].fn(); await flush();}};
 }
+
+test('sensor calibration defaults to zero and loads a saved signed offset', async () => {
+  const fresh = browser(); await flush();
+  assert.equal(fresh.element('calibration-offset').value, '0');
+  const saved = browser({}, {calibration_offset_c: -1.5}); await flush();
+  assert.equal(saved.element('calibration-offset').value, '-1.5');
+  saved.status({calibration_offset_c: 2.5});
+  assert.equal(saved.element('calibration-offset').value, '2.5');
+});
+
+test('calibration saves signed values once with the current command token', async () => {
+  const b = browser(); await flush();
+  b.setFirmware({csrf_token: 'calibration-token'});
+  b.editCalibration(-1.5); await b.command('calibration-save-button');
+  const sent = b.calls.filter(c => c.url === '/api/calibration');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].options.method, 'PUT');
+  assert.equal(sent[0].options.headers['X-P1S-CSRF'], 'calibration-token');
+  assert.deepEqual(JSON.parse(sent[0].options.body), {calibration_offset_c: -1.5});
+  assert.match(b.element('status-message').textContent, /-1\.5/);
+});
+
+test('calibration rejects blank, nonnumeric and out-of-range drafts without sending', async () => {
+  const b = browser(); await flush();
+  for (const value of ['', ' ', 'not a number', '1oops', '-10.1', '10.1', 'Infinity']) {
+    b.editCalibration(value); await b.command('calibration-save-button');
+    assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 0);
+    assert.match(b.element('status-message').textContent, /between -10 and 10/i);
+  }
+});
+
+test('decimal calibration stays readable and later status changes update a saved field', async () => {
+  const b = browser({}, {calibration_offset_c: Math.fround(1.1)}); await flush();
+  assert.equal(b.element('calibration-offset').value, '1.1');
+  b.editCalibration('2.1'); await b.command('calibration-save-button');
+  assert.equal(b.element('calibration-offset').value, '2.1');
+  b.status({calibration_offset_c: 3.5});
+  assert.equal(b.element('calibration-offset').value, '3.5');
+});
+
+test('status updates and failed saves preserve calibration drafts', async () => {
+  const b = browser(); await flush();
+  b.editCalibration(''); b.status({calibration_offset_c: 1});
+  assert.equal(b.element('calibration-offset').value, '');
+  b.editCalibration('-2.5'); b.status({calibration_offset_c: 1});
+  assert.equal(b.element('calibration-offset').value, '-2.5');
+  b.rejectCommands(500); await b.command('calibration-save-button');
+  assert.equal(b.element('calibration-offset').value, '-2.5');
+  assert.equal(b.element('status-message').textContent, 'Command rejected.');
+  assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 1);
+});
+
+test('printer automation and firmware maintenance block calibration saves', async () => {
+  const b = browser(); await flush();
+  b.printer({active: true});
+  assert.equal(b.element('calibration-offset').disabled, true);
+  assert.equal(b.element('calibration-save-button').disabled, true);
+  await b.command('calibration-save-button');
+  assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 0);
+  b.printer({active: false});
+  b.setFirmware({maintenance: true}); await b.poll();
+  assert.equal(b.element('calibration-offset').disabled, true);
+  await b.command('calibration-save-button');
+  assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 0);
+});
 
 test('every chamber mutation sends a freshly read per-boot CSRF token once', async () => {
   const b = browser(); await flush();

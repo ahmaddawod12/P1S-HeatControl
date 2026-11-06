@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "api_contract.c"
+        "http_request.c"
         "sse_hub.c"
         "web_server.c"
         "firmware_api.c"
@@ -18,6 +19,7 @@ idf_component_register(
         wifi_manager
     PRIV_REQUIRES
         controller
+        settings
         runtime
         firmware_update
         printer_control

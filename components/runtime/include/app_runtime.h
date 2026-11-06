@@ -15,6 +15,7 @@ typedef struct {
     esp_err_t (*read_sensor)(temperature_sensor_reading_t *out_reading, void *ctx);
     esp_err_t (*set_outputs)(bool heater_on, bool fan_on, void *ctx);
     esp_err_t (*save_target)(float target_c, void *ctx);
+    esp_err_t (*save_calibration)(float calibration_offset_c, void *ctx);
     void *ctx;
 } app_runtime_ops_t;
 
@@ -33,8 +34,11 @@ bool app_runtime_maintenance_active(void);
 esp_err_t app_runtime_report_startup_fault(heat_fault_t fault);
 
 esp_err_t app_runtime_set_target(float target_c);
+esp_err_t app_runtime_set_calibration(float calibration_offset_c);
 esp_err_t app_runtime_set_enabled(bool enabled);
 esp_err_t app_runtime_set_manual_fan(bool enabled);
+/* Wait up to 500 ms for the controller's decision. Refusal returns
+ * ESP_ERR_NOT_ALLOWED; a request expired before execution is discarded. */
 esp_err_t app_runtime_ack_fault(void);
 
 void app_runtime_set_network_status(int8_t rssi, const char *ip_addr);

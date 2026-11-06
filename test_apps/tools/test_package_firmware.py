@@ -43,7 +43,8 @@ class PackageFirmwareTests(unittest.TestCase):
         self.config = {"IDF_TARGET": "esp32", "ESPTOOLPY_FLASHSIZE": "4MB",
             "BOOTLOADER_APP_ROLLBACK_ENABLE": True, "SECURE_SIGNED_APPS_NO_SECURE_BOOT": True,
             "SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT": True, "SECURE_BOOT": False,
-            "P1S_WIFI_SSID": "", "P1S_WIFI_PASSWORD": "", "P1S_RELAY_ACTIVE_LOW": True}
+            "P1S_WIFI_SSID": "", "P1S_WIFI_PASSWORD": "", "P1S_RELAY_ACTIVE_LOW": False,
+            "P1S_RELEASE_REPOSITORY": "ahmaddawod12/P1S-HeatControl"}
         self.write_config()
         (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=OFF\n")
         (self.build / "project_description.json").write_text(json.dumps({"project_name": "p1s_heat_controller",
@@ -150,6 +151,19 @@ class PackageFirmwareTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "layout"):
             package_firmware(self.build, self.public, self.output, "1.0.0")
 
+    def test_rejects_active_low_release_and_bootstrap_profiles(self):
+        self.config["P1S_RELAY_ACTIVE_LOW"] = True
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "hardware profile"):
+            package_firmware(self.build, self.public, self.output, "1.0.0")
+        self.config["P1S_WIFI_SSID"] = "fixture-network"
+        self.config["P1S_WIFI_PASSWORD"] = "fixture-password"
+        self.write_config()
+        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
+        self.sign_image(personal=True)
+        with self.assertRaisesRegex(ValueError, "hardware profile"):
+            validate_bootstrap(self.build, self.public, "1.0.0")
+
     def test_bootstrap_requires_explicit_local_credentials(self):
         with self.assertRaises(ValueError): validate_bootstrap(self.build, self.public, "1.0.0")
         self.config["P1S_WIFI_SSID"] = "fixture-network"
@@ -159,6 +173,32 @@ class PackageFirmwareTests(unittest.TestCase):
         self.sign_image(personal=True)
         self.assertEqual(validate_bootstrap(self.build, self.public, "1.0.0")["version"], "1.0.0")
         with self.assertRaises(ValueError): package_firmware(self.build, self.public, self.output, "1.0.0")
+
+    def test_rejects_obsolete_update_repository(self):
+        self.config["P1S_RELEASE_REPOSITORY"] = "ahmaddawod12/P1S-HeatControl-Releases"
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "release repository"):
+            package_firmware(self.build, self.public, self.output, "1.0.0")
+        self.config.update(P1S_WIFI_SSID="fixture-network", P1S_WIFI_PASSWORD="fixture-password")
+        self.write_config()
+        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
+        self.sign_image(personal=True)
+        with self.assertRaisesRegex(ValueError, "release repository"):
+            validate_bootstrap(self.build, self.public, "1.0.0")
+
+    def test_publication_checks_package_against_rebuilt_application(self):
+        package_firmware(self.build, self.public, self.output, "1.0.0")
+        command = [sys.executable, str(Path(__file__).resolve().parents[2] / "tools/package_firmware.py"),
+            "--verify-package", str(self.output), "--build-dir", str(self.build),
+            "--public-key", str(self.public), "--version", "1.0.0"]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Same version and valid signer, but this package predates a source change.
+        self.data[700] ^= 1
+        self.sign_image()
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, "stale package was accepted")
+        self.assertIn("application output", result.stderr)
 
     def test_publish_allowlist_excludes_source(self):
         package_firmware(self.build, self.public, self.output, "1.0.0")

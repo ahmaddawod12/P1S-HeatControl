@@ -7,11 +7,11 @@ local dashboard over Wi-Fi.
 
 The firmware targets the classic `esp32` chip with ESP-IDF v6.1,
 4 MB flash, and the UART0 console through the board's USB-to-UART
-bridge. The DS18B20 DATA input uses bidirectional GPIO27; GPIO25 and GPIO26
+bridge. The DS18B20 DATA input uses bidirectional GPIO27; GPIO16 and GPIO17
 control the heater and fan relays.
 
-The local dashboard includes signed firmware updates from a separate public
-GitHub releases repository and optional verified local MQTT monitoring for a
+The local dashboard includes signed firmware updates from this public GitHub
+repository and optional verified local MQTT monitoring for a
 Bambu P1S. There is no application password. Everything the browser loads is
 served from the device. Automatic preheat/Resume is implemented behind a
 default-off qualification gate; the owner's printer workflow is still untested.
@@ -25,14 +25,15 @@ default-off qualification gate; the owner's printer workflow is still untested.
 
 | Signal | GPIO | Notes |
 |---|---|---|
-| Heater relay | GPIO25 | Runs continuously while enabled and below the target |
-| Fan relay | GPIO26 | Runs with the heater, manually, for 5 s after reaching the target, and for 10 s after disable |
+| Heater relay | GPIO16 | Runs continuously while enabled and below the target |
+| Fan relay | GPIO17 | Runs with the heater, manually, for 5 s after reaching the target, and for 10 s after disable |
 | DS18B20 DATA | GPIO27 | Digital 1-Wire; pull up to 3.3 V through 4.7 kΩ |
 
 When replacing the NTC, disconnect its divider and filter capacitor. Connect
 DS18B20 DATA to GPIO27, VCC to 3.3 V and GND to ESP32 GND. GPIO34 is input-only
-and cannot drive 1-Wire. The relay inputs remain on GPIO25 and GPIO26. Use the
-GPIO labels on the board, not the header positions. GPIO6–11 are used by flash.
+and cannot drive 1-Wire. Connect the heater relay input to GPIO16 and the fan
+relay input to GPIO17. Use the GPIO labels on the board, not the header
+positions. GPIO6–11 are used by flash.
 See [Espressif's DevKitC pin table](https://documentation.espressif.com/esp-dev-kits/en/latest/esp32/esp32-devkitc/user_guide.html).
 
 The heater and circulation fan are controlled separately. Enabling below the
@@ -75,7 +76,11 @@ The 85 °C cable limit is lower than the chip's rated maximum. The controller's
 heater and hotter surfaces. Verify overshoot during commissioning.
 
 Readings pass through a five-value median filter plus a persisted calibration
-offset limited to ±10 °C. On the first upgrade from NTC firmware, settings
+offset limited to ±10 °C, defaulting to 0 °C. Use **Sensor calibration → Save
+offset** on the dashboard to adjust it without restarting. Positive offsets
+raise the measured temperature; negative offsets lower it. The correction
+applies to both displayed readings and heater control, and survives restarts
+and firmware updates. On the first upgrade from NTC firmware, settings
 schema 1 migrates to schema 2: the target is preserved and the old NTC offset
 resets to 0 °C. A new DS18B20 calibration then persists normally. Wi-Fi settings
 are stored separately and are unaffected.
@@ -91,8 +96,11 @@ and [migration design](docs/superpowers/specs/2026-11-01-ds18b20-sensor-design.m
 
 ### Relay polarity
 
-Most opto-isolated relay boards energise on a low input, which is the default.
-Change it with:
+The current configuration is **active high**: `false` (OFF) drives LOW (`0`),
+and `true` (ON) drives HIGH (`1`). Heater GPIO16 and fan GPIO17 initialize LOW,
+with heating disabled after every boot.
+
+For active-low relay inputs, enable the polarity option with:
 
 ```powershell
 idf.py menuconfig
@@ -195,6 +203,7 @@ enable heating or clear a fault.
 | GET | `/api/status` | Full status snapshot |
 | GET | `/api/diagnostics` | Last 32 transitions and faults |
 | PUT | `/api/target` | `{"target_c": 60.0}` |
+| PUT | `/api/calibration` | Save and apply `{"calibration_offset_c": -1.5}`; range −10 to +10 °C, default 0 |
 | POST | `/api/control/enable` | Enable heating |
 | POST | `/api/control/disable` | Disable heating |
 | POST | `/api/control/fan/enable` | Run the fan manually |
@@ -212,7 +221,7 @@ enable heating or clear a fault.
 | POST | `/api/printer/cycle/stop` | Revoke chamber automation; 204; does not cancel the printer job |
 | GET | `/`, `/styles.css`, `/app.js`, `/wifi.js`, `/printer.js` | Dashboard |
 
-All chamber mutations (`/api/target`, `/api/control/*`, and `/api/fault/acknowledge`)
+All chamber mutations (`/api/target`, `/api/calibration`, `/api/control/*`, and `/api/fault/acknowledge`)
 require a matching local `Origin` and `X-P1S-CSRF`, using the per-boot token from
 `GET /api/firmware`. This applies through both the normal network and setup
 hotspot. Missing or mismatched headers return `403`. The dashboard reads the
@@ -220,8 +229,14 @@ current token before each deliberate chamber command; it never retries a mutatio
 Target bodies must contain exactly one numeric `target_c` field. Nested input
 is rejected before recursive JSON parsing; duplicate, unknown and trailing
 input is also rejected.
+Calibration bodies follow the same rules with one finite numeric
+`calibration_offset_c` field from −10 to +10 °C. Status and SSE include the
+active `calibration_offset_c` value.
 Bodies remain limited to 256 bytes. A receive timeout or expired five-second
 body deadline returns `408` and releases the HTTP task for other requests.
+The same five-second deadline applies to firmware, Wi-Fi and printer bodies,
+including each blocking socket read. Rejected or incomplete bodies close the
+connection instead of being drained. GET routes reject nonempty bodies.
 The chamber control and fault-acknowledgement POSTs require empty bodies;
 nonempty bodies return `400` and close the connection before any command runs.
 
@@ -231,9 +246,16 @@ and internal errors `500`. At most four SSE clients are served at once; a
 status frame goes out whenever the status changes, and `: keepalive` after
 fifteen quiet seconds.
 
+Fault acknowledgement waits for the controller's decision and published status.
+An uncleared sensor fault, a chamber still too hot, or an output-initialisation
+fault returns `409`; a controller response timeout returns `503`. Requests that
+expire before execution do not clear a fault later. Successful acknowledgement
+leaves heating disabled. `/api/diagnostics` retains the last 32 controller state
+or fault changes for the current runtime, without repeating unchanged faults.
+
 Firmware update requests return `202` when accepted, `409` while busy or in
 trial maintenance, and `503` when unavailable. Maintenance also rejects heat
-enable, target changes, manual fan enable and fault acknowledgement with `409`.
+enable, target/calibration changes, manual fan enable and fault acknowledgement with `409`.
 The LAN dashboard has no account authentication; the update route checks the
 request's local origin and per-boot token. All printer mutations use the same
 Origin/`X-P1S-CSRF` protection, with 400 for invalid input, 403 for an untrusted
@@ -257,10 +279,14 @@ pass local runtime, storage, Wi-Fi and HTTP health checks within two minutes;
 otherwise it rolls back when a previous confirmed image is available.
 
 See [the OTA release guide](docs/ota-release-guide.md) for signing, public
-packaging, USB setup and recovery. The source repository stays private. The
-public repository `ahmaddawod12/P1S-HeatControl-Releases` contains the approved
-test releases. See the [implementation status](docs/ota-implementation-status.md)
-for measured board results and remaining physical commissioning checks.
+packaging, USB setup and recovery. Source and releases share
+[`ahmaddawod12/P1S-HeatControl`](https://github.com/ahmaddawod12/P1S-HeatControl).
+Version **1.0.0** starts the public source release series. Devices running the
+previous development versions, including 1.0.5, need a signed USB installation
+to adopt the reset version, new update repository and active-high relay profile.
+Subsequent newer releases use dashboard OTA normally.
+See the [historical implementation status](docs/ota-implementation-status.md)
+for earlier board results and remaining physical commissioning checks.
 
 ## Build and flash
 

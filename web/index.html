@@ -44,6 +44,16 @@
     </div>
   </section>
 
+  <section class="card" aria-labelledby="calibration-heading">
+    <h2 id="calibration-heading">Sensor calibration</h2>
+    <label class="calibration-label" for="calibration-offset">Calibration offset (&deg;C)</label>
+    <div class="target-controls">
+      <input type="number" id="calibration-offset" min="-10" max="10" step="0.1" value="0" inputmode="decimal" aria-describedby="calibration-hint" disabled>
+      <button type="button" id="calibration-save-button" disabled>Save offset</button>
+    </div>
+    <p class="hint" id="calibration-hint">Default 0 &deg;C. Add up to 10 &deg;C or subtract up to 10 &deg;C from the sensor reading. Saved across restarts.</p>
+  </section>
+
   <section class="card fault" id="fault-panel" hidden aria-labelledby="fault-heading">
     <h2 id="fault-heading">Fault latched</h2>
     <p class="fault-name" id="fault-name">--</p>

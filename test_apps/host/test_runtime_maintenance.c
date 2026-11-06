@@ -4,11 +4,15 @@
 #include "board_outputs.h"
 #include "settings.h"
 #include "esp_timer.h"
+#include "diagnostics.h"
+#include "host_freertos.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <assert.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static atomic_bool heater, fan, fail_output, block_save;
@@ -22,12 +26,22 @@ static atomic_ullong last_slow_read_ms;
 static atomic_bool stall_sensor, stall_entered, release_stall;
 static SemaphoreHandle_t save_entered, save_release, setter_done;
 static esp_err_t setter_result;
+static _Atomic float saved_calibration;
+static atomic_uint calibration_saves;
 
 void settings_factory_defaults(settings_data_t *data)
 { *data = (settings_data_t) {SETTINGS_SCHEMA_VERSION, 60.0f, 0.0f}; }
 esp_err_t settings_load(settings_data_t *data, settings_load_result_t *result)
-{ settings_factory_defaults(data); *result = SETTINGS_LOAD_LOADED; return ESP_OK; }
+{ settings_factory_defaults(data); data->calibration_offset_c = atomic_load(&saved_calibration);
+  *result = SETTINGS_LOAD_LOADED; return ESP_OK; }
 esp_err_t settings_set_target(float value) { (void) value; return ESP_OK; }
+esp_err_t settings_set_calibration(float value)
+{
+    atomic_fetch_add(&calibration_saves, 1);
+    if (atomic_load(&save_result) != ESP_OK) return atomic_load(&save_result);
+    atomic_store(&saved_calibration, value);
+    return ESP_OK;
+}
 temperature_sensor_config_t temperature_sensor_default_config(int gpio)
 { return (temperature_sensor_config_t) {gpio}; }
 esp_err_t temperature_sensor_init(temperature_sensor_t *device, const temperature_sensor_config_t *config)
@@ -73,6 +87,8 @@ static esp_err_t save_target(float value, void *ctx)
     atomic_fetch_add(&saves, 1);
     return atomic_load(&save_result);
 }
+static esp_err_t save_calibration(float value, void *ctx)
+{ (void) ctx; return settings_set_calibration(value); }
 static uint64_t now_ms(void) { return (uint64_t) esp_timer_get_time() / 1000; }
 static app_status_t wait_status(bool ready, bool heat, uint32_t timeout)
 {
@@ -90,7 +106,7 @@ static app_status_t wait_status(bool ready, bool heat, uint32_t timeout)
 }
 static void start(void)
 {
-    const app_runtime_ops_t ops = {read_sensor, set_outputs, save_target, NULL};
+    const app_runtime_ops_t ops = {read_sensor, set_outputs, save_target, save_calibration, NULL};
     assert(app_runtime_start_with_ops(&ops) == ESP_OK);
     (void) wait_status(true, false, 4000);
 }
@@ -180,6 +196,79 @@ static app_status_t wait_fault(heat_fault_t fault, uint32_t timeout)
             fault, status.fault, status.heater_on);
     assert(!"blocked persistence delayed safety fault shutdown");
     return status;
+}
+
+static app_status_t wait_calibration(float offset)
+{
+    const uint64_t began = now_ms();
+    app_status_t status;
+    do {
+        app_runtime_get_status(&status);
+        if (status.calibration_offset_c == offset) return status;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    } while (now_ms() - began < 1000U);
+    assert(!"calibration was not applied");
+    return status;
+}
+
+static void calibration_applies_live_and_survives_restart(void)
+{
+    start();
+    app_status_t status = wait_calibration(0.0f);
+    assert(status.temperature.raw_c == 25.0f && status.temperature.filtered_c == 25.0f);
+    assert(app_runtime_set_calibration(2.5f) == ESP_OK);
+    status = wait_calibration(2.5f);
+    assert(status.temperature.raw_c == 27.5f && status.temperature.filtered_c == 27.5f);
+    assert(status.temperature.valid && status.temperature.consecutive_valid >= 3U);
+    assert(!status.enabled && !status.heater_on && status.target_c == 60.0f);
+    assert(atomic_load(&saved_calibration) == 2.5f);
+    vTaskDelay(pdMS_TO_TICKS(600));
+    status = wait_calibration(2.5f);
+    assert(status.temperature.raw_c == 27.5f && status.temperature.filtered_c == 27.5f);
+
+    assert(app_runtime_set_calibration(-1.5f) == ESP_OK);
+    status = wait_calibration(-1.5f);
+    assert(status.temperature.raw_c == 23.5f && status.temperature.filtered_c == 23.5f);
+    const unsigned saves_before = atomic_load(&calibration_saves);
+    const float invalid[] = {NAN, INFINITY, -INFINITY, -10.01f, 10.01f};
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        assert(app_runtime_set_calibration(invalid[i]) == ESP_ERR_INVALID_ARG);
+    }
+    assert(atomic_load(&calibration_saves) == saves_before);
+    atomic_store(&save_result, ESP_FAIL);
+    assert(app_runtime_set_calibration(4.0f) == ESP_FAIL);
+    assert(wait_calibration(-1.5f).temperature.filtered_c == 23.5f);
+    atomic_store(&save_result, ESP_OK);
+    app_runtime_stop();
+    start();
+    status = wait_calibration(-1.5f);
+    assert(status.temperature.filtered_c == 23.5f && !status.enabled);
+    assert(app_runtime_auto_acquire(77, 60.0f, now_ms() + 5000U) == ESP_OK);
+    assert(app_runtime_set_calibration(1.0f) == ESP_ERR_NOT_ALLOWED);
+    app_runtime_auto_revoke(77);
+    (void) wait_status(true, false, 2000U);
+    app_runtime_stop();
+    atomic_store(&saved_calibration, 0.0f);
+}
+
+static void calibration_enforces_overtemperature_without_new_sensor_sample(void)
+{
+    atomic_store(&sensor_temperature_c, 75.0f);
+    start();
+    atomic_store(&stall_entered, false);
+    atomic_store(&release_stall, false);
+    atomic_store(&stall_sensor, true);
+    const uint64_t began = now_ms();
+    while (!atomic_load(&stall_entered) && now_ms() - began < 1000U) vTaskDelay(pdMS_TO_TICKS(10));
+    assert(atomic_load(&stall_entered));
+    assert(app_runtime_set_calibration(10.0f) == ESP_OK);
+    const app_status_t status = wait_fault(HEAT_FAULT_OVERTEMP, 600U);
+    assert(status.temperature.raw_c == 85.0f && !status.enabled);
+    atomic_store(&stall_sensor, false);
+    atomic_store(&release_stall, true);
+    app_runtime_stop();
+    atomic_store(&saved_calibration, 0.0f);
+    atomic_store(&sensor_temperature_c, 25.0f);
 }
 
 static void blocked_save_does_not_delay_disable(void)
@@ -353,10 +442,14 @@ static void stalled_acquisition_shuts_down_and_requires_three_fresh_samples(void
      * next tick; neither one nor two may qualify fault acknowledgment. */
     assert(status.temperature.valid && status.temperature.consecutive_valid >= 1 &&
            status.temperature.consecutive_valid < 3);
-    assert(app_runtime_ack_fault() == ESP_OK);
+    atomic_store(&release_stall, false);
+    atomic_store(&stall_sensor, true);
+    assert(app_runtime_ack_fault() == ESP_ERR_NOT_ALLOWED);
     vTaskDelay(pdMS_TO_TICKS(150));
     app_runtime_get_status(&status);
     assert(status.state == HEAT_STATE_FAULT && !status.heater_on);
+    atomic_store(&stall_sensor, false);
+    atomic_store(&release_stall, true);
     (void) wait_status(true, false, 4000);
     assert(app_runtime_ack_fault() == ESP_OK);
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -365,10 +458,124 @@ static void stalled_acquisition_shuts_down_and_requires_three_fresh_samples(void
     app_runtime_stop();
 }
 
+static app_status_t wait_temperature_below(float threshold)
+{
+    const uint64_t began=now_ms();
+    app_status_t status;
+    do {
+        app_runtime_get_status(&status);
+        if(status.temperature.valid && status.temperature.consecutive_valid>=3 &&
+           status.temperature.raw_c<threshold && status.temperature.filtered_c<threshold)return status;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    } while(now_ms()-began<4000);
+    assert(!"temperature did not recover");return status;
+}
+
+static void acknowledgement_reports_controller_decision(const char *scenario)
+{
+    start();
+    heat_fault_t fault=HEAT_FAULT_NVS;
+    if(!strcmp(scenario,"ack_output"))fault=HEAT_FAULT_OUTPUT_INIT;
+    else if(!strcmp(scenario,"ack_sensor"))fault=HEAT_FAULT_SENSOR_OPEN;
+    else if(!strcmp(scenario,"ack_stale"))fault=HEAT_FAULT_SENSOR_STALE;
+    else if(!strcmp(scenario,"ack_overtemp"))fault=HEAT_FAULT_OVERTEMP;
+    if(fault==HEAT_FAULT_SENSOR_OPEN)atomic_store(&sensor_fault,TEMPERATURE_SENSOR_FAULT_OPEN);
+    else if(fault==HEAT_FAULT_SENSOR_STALE)atomic_store(&stall_sensor,true);
+    else if(fault==HEAT_FAULT_OVERTEMP)atomic_store(&sensor_temperature_c,85);
+    else assert(app_runtime_report_startup_fault(fault)==ESP_OK);
+    (void)wait_fault(fault,3500);
+
+    if(!strcmp(scenario,"ack_expired") || !strcmp(scenario,"ack_early_timeout")) {
+        host_control_queue_pause(true);
+        const uint64_t began=now_ms();
+        while(!host_control_queue_is_paused() && now_ms()-began<1000)vTaskDelay(pdMS_TO_TICKS(10));
+        assert(host_control_queue_is_paused());
+        if(!strcmp(scenario,"ack_early_timeout"))host_reply_queue_timeout_early();
+        const uint64_t requested=now_ms();
+        assert(app_runtime_ack_fault()==ESP_ERR_TIMEOUT);
+        assert(now_ms()-requested>=500);
+        host_control_queue_pause(false);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        app_status_t status;app_runtime_get_status(&status);
+        assert(status.state==HEAT_STATE_FAULT && status.fault==HEAT_FAULT_NVS);
+    } else if(!strcmp(scenario,"ack_changed_fault")) {
+        atomic_store(&sensor_temperature_c,85);
+        const uint64_t began=now_ms();
+        app_status_t status;
+        do {
+            app_runtime_get_status(&status);
+            if(status.temperature.raw_c>=85)break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        } while(now_ms()-began<1500);
+        assert(status.temperature.raw_c>=85 && status.fault==HEAT_FAULT_NVS);
+        assert(app_runtime_ack_fault()==ESP_ERR_NOT_ALLOWED);
+        app_runtime_get_status(&status);
+        assert(status.state==HEAT_STATE_FAULT && status.fault==HEAT_FAULT_OVERTEMP);
+        atomic_store(&sensor_temperature_c,25);
+        (void)wait_temperature_below(80);
+    } else if(fault!=HEAT_FAULT_NVS) {
+        assert(app_runtime_ack_fault()==ESP_ERR_NOT_ALLOWED);
+        app_status_t status;app_runtime_get_status(&status);
+        assert(status.state==HEAT_STATE_FAULT && !status.enabled && !status.heater_on);
+        if(fault==HEAT_FAULT_OUTPUT_INIT){app_runtime_stop();return;}
+        atomic_store(&sensor_fault,TEMPERATURE_SENSOR_FAULT_NONE);
+        atomic_store(&sensor_temperature_c,25);
+        atomic_store(&stall_sensor,false);
+        atomic_store(&release_stall,true);
+        (void)wait_temperature_below(80);
+    }
+    assert(app_runtime_ack_fault()==ESP_OK);
+    app_status_t status;app_runtime_get_status(&status);
+    assert(status.state==HEAT_STATE_IDLE && status.fault==HEAT_FAULT_NONE);
+    assert(!status.enabled && !status.heater_on && !atomic_load(&heater));
+    app_runtime_stop();
+}
+
+static void runtime_records_transition_history(void)
+{
+    start();
+    diagnostic_record_t records[DIAGNOSTICS_CAPACITY];size_t count=0;
+    diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);
+    assert(count==1 && records[0].from_state==HEAT_STATE_BOOT && records[0].to_state==HEAT_STATE_IDLE);
+    assert(records[0].fault==HEAT_FAULT_NONE && records[0].timestamp_ms>0);
+    enable();
+    atomic_store(&sensor_fault,TEMPERATURE_SENSOR_FAULT_OPEN);
+    (void)wait_fault(HEAT_FAULT_SENSOR_OPEN,1500);
+    diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);
+    assert(count==3 && records[1].from_state==HEAT_STATE_IDLE && records[1].to_state==HEAT_STATE_HEATING);
+    assert(records[2].from_state==HEAT_STATE_HEATING && records[2].to_state==HEAT_STATE_FAULT);
+    assert(records[2].fault==HEAT_FAULT_SENSOR_OPEN);
+    vTaskDelay(pdMS_TO_TICKS(400));
+    diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);assert(count==3);
+
+    assert(app_runtime_report_startup_fault(HEAT_FAULT_NVS)==ESP_OK);
+    (void)wait_fault(HEAT_FAULT_NVS,1000);
+    diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);
+    assert(count==4 && records[3].from_state==HEAT_STATE_FAULT && records[3].to_state==HEAT_STATE_FAULT);
+    assert(records[3].fault==HEAT_FAULT_NVS);
+    atomic_store(&sensor_fault,TEMPERATURE_SENSOR_FAULT_NONE);
+    (void)wait_temperature_below(80);
+    assert(app_runtime_ack_fault()==ESP_OK);
+    diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);
+    assert(count==5 && records[4].from_state==HEAT_STATE_FAULT && records[4].to_state==HEAT_STATE_IDLE);
+    assert(records[4].fault==HEAT_FAULT_NONE);
+    for(size_t i=1;i<count;++i)assert(records[i].timestamp_ms>=records[i-1].timestamp_ms);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);assert(count==5);
+    app_runtime_stop();
+}
+
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     if (argc == 2) {
-        if (strcmp(argv[1], "save_disable") == 0) blocked_save_does_not_delay_disable();
+        if (strcmp(argv[1], "diagnostics") == 0) runtime_records_transition_history();
+        else if (strncmp(argv[1], "ack_",4) == 0) acknowledgement_reports_controller_decision(argv[1]);
+        else if (strcmp(argv[1], "calibration") == 0) calibration_applies_live_and_survives_restart();
+        else if (strcmp(argv[1], "calibration_overtemp") == 0) calibration_enforces_overtemperature_without_new_sensor_sample();
+        else if (strcmp(argv[1], "save_disable") == 0) blocked_save_does_not_delay_disable();
         else if (strcmp(argv[1], "save_sensor") == 0) blocked_save_does_not_delay_sensor_fault();
         else if (strcmp(argv[1], "save_overtemp") == 0) blocked_save_does_not_delay_overtemperature();
         else if (strcmp(argv[1], "save_stale") == 0) blocked_save_does_not_delay_stale_shutdown();

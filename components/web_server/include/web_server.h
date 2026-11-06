@@ -15,6 +15,7 @@
 typedef struct {
     void (*get_status)(app_status_t *out_status);
     esp_err_t (*set_target)(float target_c);
+    esp_err_t (*set_calibration)(float calibration_offset_c);
     esp_err_t (*set_enabled)(bool enabled);
     esp_err_t (*set_manual_fan)(bool enabled);
     esp_err_t (*ack_fault)(void);

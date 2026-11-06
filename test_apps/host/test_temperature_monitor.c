@@ -81,8 +81,47 @@ static void test_sample_gap_restarts_streak_and_filter(void)
     assert_close(60.0f, sample.filtered_c, 0.001f);
 }
 
+static void test_live_calibration_rebases_history_and_future_samples(void)
+{
+    temperature_monitor_t monitor;
+    temperature_monitor_init(&monitor, 0.0f);
+    for (unsigned i = 0; i < 5U; ++i) {
+        temperature_monitor_push(&monitor, 40.0f, TEMPERATURE_SENSOR_FAULT_NONE, i * 500U);
+    }
+    assert(temperature_monitor_set_calibration(&monitor, 2.5f));
+    temperature_sample_t sample = temperature_monitor_snapshot(&monitor, 2000U);
+    assert(sample.valid && sample.consecutive_valid == 5U && sample.timestamp_ms == 2000U);
+    assert_close(42.5f, sample.raw_c, 0.001f);
+    assert_close(42.5f, sample.filtered_c, 0.001f);
+
+    assert(temperature_monitor_set_calibration(&monitor, -1.5f));
+    temperature_monitor_push(&monitor, 40.0f, TEMPERATURE_SENSOR_FAULT_NONE, 2500U);
+    sample = temperature_monitor_snapshot(&monitor, 2500U);
+    assert_close(38.5f, sample.raw_c, 0.001f);
+    assert_close(38.5f, sample.filtered_c, 0.001f);
+    assert(!temperature_monitor_set_calibration(&monitor, NAN));
+    assert_close(38.5f, temperature_monitor_snapshot(&monitor, 2500U).filtered_c, 0.001f);
+}
+
+static void test_live_calibration_preserves_fault_and_sample_age(void)
+{
+    temperature_monitor_t monitor;
+    temperature_monitor_init(&monitor, 0.0f);
+    temperature_monitor_push(&monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, 1000U);
+    assert(temperature_monitor_set_calibration(&monitor, -2.0f));
+    temperature_sample_t sample = temperature_monitor_snapshot(&monitor, 3001U);
+    assert(!sample.valid && sample.fault == HEAT_FAULT_SENSOR_STALE);
+    assert(sample.timestamp_ms == 1000U && sample.consecutive_valid == 0U);
+    temperature_monitor_push(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_OPEN, 3500U);
+    assert(temperature_monitor_set_calibration(&monitor, 1.0f));
+    sample = temperature_monitor_snapshot(&monitor, 3500U);
+    assert(!sample.valid && sample.fault == HEAT_FAULT_SENSOR_OPEN && isnan(sample.raw_c));
+}
+
 int main(void)
 {
+    test_live_calibration_rebases_history_and_future_samples();
+    test_live_calibration_preserves_fault_and_sample_age();
     test_sample_gap_restarts_streak_and_filter();
     test_median_rejects_spike();
     test_stale_after_two_seconds();

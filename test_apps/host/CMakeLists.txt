@@ -68,11 +68,12 @@ endforeach()
 enable_testing()
 
 add_executable(test_printer_api_policy test_printer_api_policy.c printer_stubs/unused_nvs.c
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/http_request.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/printer_api.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/printer_api_policy.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/device_config/device_config.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../managed_components/espressif__cjson/cJSON/cJSON.c")
-target_include_directories(test_printer_api_policy PRIVATE printer_stubs stubs
+target_include_directories(test_printer_api_policy PRIVATE web_stubs printer_stubs stubs
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/app_types/include"
@@ -320,12 +321,14 @@ target_compile_options(test_firmware_api_policy PRIVATE -Wall -Wextra -Werror -p
 add_test(NAME firmware_api_policy COMMAND test_firmware_api_policy)
 
 add_executable(test_runtime_maintenance test_runtime_maintenance.c host_freertos.c
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/diagnostics/diagnostics.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/runtime_auto_lease.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/app_runtime.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/runtime_output_policy.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/controller/heat_controller.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/temperature/temperature_monitor.c")
 target_include_directories(test_runtime_maintenance PRIVATE stubs
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/diagnostics/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/app_types/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime"
@@ -339,6 +342,14 @@ foreach(persistence_case disable sensor overtemp stale queue failure maintenance
     add_test(NAME runtime_persistence_${persistence_case}
         COMMAND test_runtime_maintenance save_${persistence_case})
 endforeach()
+foreach(calibration_case calibration calibration_overtemp)
+    add_test(NAME runtime_${calibration_case}
+        COMMAND test_runtime_maintenance ${calibration_case})
+endforeach()
+foreach(ack_case output sensor stale overtemp recovery expired early_timeout changed_fault)
+    add_test(NAME runtime_ack_${ack_case} COMMAND test_runtime_maintenance ack_${ack_case})
+endforeach()
+add_test(NAME runtime_diagnostics COMMAND test_runtime_maintenance diagnostics)
 
 add_executable(test_service_operation test_service_operation.c
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/service_operation.c")
@@ -416,14 +427,23 @@ foreach(scenario none nvs netif event_loop radio_init storage wifi_handler ip_ha
 endforeach()
 
 add_executable(test_chamber_http test_chamber_http.c web_stubs/unused_services.c
+    printer_stubs/unused_nvs.c
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/http_request.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/api_contract.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/firmware_api.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/firmware_api_policy.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/wifi_api.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/wifi_api_policy.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/printer_api.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/printer_api_policy.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/wifi_manager/wifi_credentials.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/device_config/device_config.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/firmware_update/firmware_policy.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/controller/heat_controller.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../managed_components/espressif__cjson/cJSON/cJSON.c")
 set_target_properties(test_chamber_http PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
 target_include_directories(test_chamber_http PRIVATE web_stubs printer_stubs stubs
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/settings/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/web_server"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/app_types/include"
@@ -441,6 +461,8 @@ target_include_directories(test_chamber_http PRIVATE web_stubs printer_stubs stu
     "${CMAKE_CURRENT_LIST_DIR}/../../managed_components/espressif__cjson/cJSON")
 target_compile_options(test_chamber_http PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(test_chamber_http PRIVATE m)
-foreach(chamber_case json origin timeout deadline sse)
+foreach(chamber_case json calibration origin timeout deadline sse
+    service_rejection service_timeout service_trickle service_final_chunk
+    service_disconnect service_nul get_body final_chunk acknowledgement)
     add_test(NAME chamber_http_${chamber_case} COMMAND test_chamber_http ${chamber_case})
 endforeach()

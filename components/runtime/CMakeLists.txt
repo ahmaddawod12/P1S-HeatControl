@@ -11,6 +11,7 @@ idf_component_register(
     PRIV_REQUIRES
         board
         controller
+        diagnostics
         temperature
         settings
         esp_timer

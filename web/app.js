@@ -13,6 +13,8 @@
     fanBadge: document.getElementById('fan-badge'),
     slider: document.getElementById('target-slider'),
     number: document.getElementById('target-temperature'),
+    calibration: document.getElementById('calibration-offset'),
+    calibrationSave: document.getElementById('calibration-save-button'),
     hint: document.getElementById('target-hint'),
     warning: document.getElementById('high-target-warning'),
     enable: document.getElementById('enable-button'),
@@ -54,6 +56,8 @@
 
   var busy = false;
   var editingTarget = false;
+  var editingCalibration = false;
+  var savedCalibrationDraft = null;
   var lastStatus = null;
   var firmware = null;
   var firstFirmwareVersion = null;
@@ -143,6 +147,14 @@
     el.fanBadge.textContent = status.fan_on ? 'Fan on' : 'Fan off';
 
     setTargetInputs(status.target_c);
+    if (savedCalibrationDraft !== null && el.calibration.value === savedCalibrationDraft &&
+        Math.abs(status.calibration_offset_c - Number(savedCalibrationDraft)) < 0.000001) {
+      editingCalibration = false;
+      savedCalibrationDraft = null;
+    }
+    if (!editingCalibration && typeof status.calibration_offset_c === 'number') {
+      el.calibration.value = String(Number(status.calibration_offset_c.toPrecision(7)));
+    }
 
     var faulted = state === 'fault';
     el.faultPanel.hidden = !faulted;
@@ -164,6 +176,8 @@
       : 'Run fan manually';
     el.slider.disabled = locked || printerActive;
     el.number.disabled = locked || printerActive;
+    el.calibration.disabled = locked || printerActive;
+    el.calibrationSave.disabled = locked || printerActive;
 
     el.ip.textContent = status.ip_addr || '--';
     el.rssi.textContent = status.wifi_rssi ? status.wifi_rssi + ' dBm' : '--';
@@ -180,7 +194,7 @@
     return 'Request failed with status ' + response.status + '.';
   }
 
-  function send(path, options, successMessage) {
+  function send(path, options, successMessage, onSuccess) {
     setControlsBusy(true);
     setMessage('Working…');
 
@@ -197,6 +211,7 @@
       return fetch(path, options);
     }).then(function (response) {
       if (response.ok) {
+        if (onSuccess) onSuccess();
         setMessage(successMessage || '');
         return null;
       }
@@ -274,6 +289,28 @@
   el.enable.addEventListener('click', function () {
     if (printerActive) return;
     postCommand('/api/control/enable', 'Heating enabled.');
+  });
+
+  el.calibration.addEventListener('input', function () {
+    editingCalibration = true;
+    savedCalibrationDraft = null;
+  });
+
+  el.calibrationSave.addEventListener('click', function () {
+    if (busy || maintenanceActive() || printerActive) return;
+    var draft = el.calibration.value;
+    var offset = Number(draft);
+    if (!draft.trim() || !isFinite(offset) || offset < -10 || offset > 10) {
+      setMessage('Calibration offset must be between -10 and 10 °C.', 'error');
+      return;
+    }
+    send('/api/calibration', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ calibration_offset_c: offset })
+    }, 'Calibration offset saved: ' + offset + ' °C.', function () {
+      if (el.calibration.value === draft) savedCalibrationDraft = draft;
+    });
   });
 
   el.disable.addEventListener('click', function () {

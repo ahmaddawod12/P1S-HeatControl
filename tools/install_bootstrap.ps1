@@ -40,8 +40,8 @@ if (-not $Flash) {
     exit 0
 }
 if ($Port -notmatch '^COM[1-9][0-9]*$') { throw 'Select the intended Windows serial port explicitly.' }
-$p1sPortInfo = Get-CimInstance Win32_SerialPort | Where-Object DeviceID -EQ $Port
-if (-not $p1sPortInfo) { throw 'The selected serial port is not present.' }
+# USB-to-UART adapters can expose a working COM port without a Win32_SerialPort entry.
+if ([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port) { throw 'The selected serial port is not present.' }
 $p1sBackupDir = Join-Path $p1sBuild 'private-backups'
 New-Item -ItemType Directory -Force -Path $p1sBackupDir | Out-Null
 $p1sBackup = Join-Path $p1sBackupDir ('nvs-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '.bin')
