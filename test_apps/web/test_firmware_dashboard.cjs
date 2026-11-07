@@ -43,7 +43,7 @@ function browser(initial = {}, initialStatus = {}) {
   context.window = context;
   context.addEventListener = (name,fn) => {events[name]=fn;};
   vm.runInNewContext(source, context, {filename: 'app.js'});
-  return {element, calls, printer(detail) {events['p1s-printer-control']({detail});}, get reloads() {return reloads;},
+  return {element, calls, events, get reloads() {return reloads;},
     setFirmware(v) {firmware = {...firmware, ...v};}, offline(v) {offline = v;}, losePost(v) {losePost = v;},
     rejectCommands(status) {commandFailure=status;},
     editCalibration(value) {element('calibration-offset').value = String(value); element('calibration-offset').listeners.input();},
@@ -106,16 +106,11 @@ test('status updates and failed saves preserve calibration drafts', async () => 
   assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 1);
 });
 
-test('printer automation and firmware maintenance block calibration saves', async () => {
+test('firmware maintenance blocks calibration saves', async () => {
   const b = browser(); await flush();
-  b.printer({active: true});
-  assert.equal(b.element('calibration-offset').disabled, true);
-  assert.equal(b.element('calibration-save-button').disabled, true);
-  await b.command('calibration-save-button');
-  assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 0);
-  b.printer({active: false});
   b.setFirmware({maintenance: true}); await b.poll();
   assert.equal(b.element('calibration-offset').disabled, true);
+  assert.equal(b.element('calibration-save-button').disabled, true);
   await b.command('calibration-save-button');
   assert.equal(b.calls.filter(c => c.url === '/api/calibration').length, 0);
 });
@@ -168,13 +163,10 @@ test('one click requests one installation with the current CSRF token', async ()
   assert.equal(posts.length, 1); assert.equal(posts[0].options.method, 'POST');
   assert.equal(posts[0].options.headers['X-P1S-CSRF'], 'token-one');
 });
-test('automatic printer ownership locks target, Enable and update while fan and Disable stay available',async()=>{
-  const b=browser();await flush();b.printer({active:true,known:true});
-  for(const id of ['target-slider','target-temperature','enable-button','firmware-update-button'])assert.equal(b.element(id).disabled,true,id);
-  assert.equal(b.element('fan-toggle-button').disabled,false);assert.equal(b.element('disable-button').disabled,false);
-  b.element('enable-button').listeners.click();b.element('target-temperature').listeners.change();await b.click();
-  assert.equal(b.calls.filter(c=>c.options.method).length,0);
-  b.printer({active:false,known:true});assert.equal(b.element('target-slider').disabled,false);
+test('printer monitoring never locks manual controls',async()=>{
+  const b=browser();await flush();
+  assert.equal('p1s-printer-control' in b.events,false);
+  for(const id of ['target-slider','target-temperature','calibration-offset','firmware-update-button','fan-toggle-button'])assert.equal(b.element(id).disabled,false,id);
 });
 test('maintenance locks heating controls and leaves Disable available', async () => {
   const b = browser({phase: 'downloading', maintenance: true}); await flush();

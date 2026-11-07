@@ -1,5 +1,13 @@
 # P1S status, chamber preheat, and print resume
 
+> **Superseded (2026-11-08)** by the [Monitor P1S design](2026-11-07-monitor-p1s-design.md).
+
+Historical design: the build-time qualification gate below was removed at the
+owner's request on 2026-11-07. Current availability follows
+[paused-target Resume design](2026-11-07-paused-target-resume-design.md).
+The later request also supersedes the initial-pause/job-identity admission,
+confirmation checkbox, one-degree band and 30-second settling rules below.
+
 Date: 2026-11-01
 
 Status: design accepted for implementation; source implementation is on main.

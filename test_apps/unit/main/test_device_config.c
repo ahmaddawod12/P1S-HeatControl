@@ -9,7 +9,7 @@ TEST_CASE("optional printer record survives reload and clear preserves Wi-Fi", "
 {
     TEST_ESP_OK(device_config_init());
     TEST_ESP_OK(device_config_clear_printer());
-    printer_connection_config_t p={.enabled=true,.ipv4="192.168.1.9",.serial="TEST123",.access_code="test-code",.ntp_host="pool.ntp.org"}, got;
+    printer_connection_config_t p={.enabled=true,.ipv4="192.168.1.9",.serial="TEST123",.access_code="test-code"}, got;
     device_wifi_credentials_t wifi={"fixture","fixture-password"}, saved;
     TEST_ESP_OK(device_config_save_wifi(&wifi));
     TEST_ESP_OK(device_config_save_printer(&p));

@@ -110,7 +110,7 @@ esp_err_t esp_event_handler_instance_register(esp_event_base_t base, int32_t id,
         s_registered_wifi = handler;
         ++s_wifi_registrations;
     } else {
-        assert(strcmp(base, IP_EVENT) == 0 && id == IP_EVENT_STA_GOT_IP);
+        assert(strcmp(base, IP_EVENT) == 0 && id == ESP_EVENT_ANY_ID);
         if (failing(FAIL_IP_HANDLER)) return ESP_FAIL;
         s_registered_ip = handler;
         ++s_ip_registrations;

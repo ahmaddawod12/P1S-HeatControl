@@ -112,6 +112,11 @@ void heat_controller_step(heat_controller_t *controller,
         force_idle(controller, now_ms);
         return;
     }
+    if (controller->snapshot.inhibited) {
+        record_output(controller, false, now_ms);
+        controller->snapshot.state = HEAT_STATE_HOLDING;
+        return;
+    }
 
     if (sample->filtered_c >= controller->snapshot.target_c) {
         record_output(controller, false, now_ms);
@@ -180,7 +185,8 @@ bool heat_controller_command(heat_controller_t *controller,
             return true;
         }
         controller->snapshot.enabled = true;
-        if (sample->filtered_c >= controller->snapshot.target_c) {
+        if (controller->snapshot.inhibited ||
+            sample->filtered_c >= controller->snapshot.target_c) {
             record_output(controller, false, now_ms);
             controller->snapshot.state = HEAT_STATE_HOLDING;
         } else {
@@ -225,6 +231,20 @@ bool heat_controller_command(heat_controller_t *controller,
 
     default:
         return false;
+    }
+}
+
+void heat_controller_set_inhibit(heat_controller_t *controller,
+                                 bool inhibited,
+                                 uint64_t now_ms)
+{
+    if (controller == NULL) {
+        return;
+    }
+    controller->snapshot.inhibited = inhibited;
+    if (inhibited && controller->snapshot.enabled) {
+        record_output(controller, false, now_ms);
+        controller->snapshot.state = HEAT_STATE_HOLDING;
     }
 }
 

@@ -262,8 +262,86 @@ static void test_external_fault_policy(void)
                                     3000U));
 }
 
+static const heat_controller_command_t k_enable = {.kind = HEAT_COMMAND_ENABLE};
+
+static void test_inhibit_holds_output_off(void)
+{
+    heat_controller_t controller = ready_controller();
+    temperature_sample_t cold = sample(40.0f, 40.0f, true, 3U, HEAT_FAULT_NONE);
+    assert(heat_controller_command(&controller, &k_enable, &cold, 0U));
+    assert(heat_controller_snapshot(&controller).output_on);
+
+    heat_controller_set_inhibit(&controller, true, 1000U);
+    heat_controller_snapshot_t s = heat_controller_snapshot(&controller);
+    assert(!s.output_on && s.enabled && s.inhibited);
+    assert(s.state == HEAT_STATE_HOLDING);
+
+    heat_controller_step(&controller, &cold, 60000U);
+    s = heat_controller_snapshot(&controller);
+    assert(!s.output_on && s.enabled && s.state == HEAT_STATE_HOLDING);
+}
+
+static void test_inhibit_release_waits_min_transition(void)
+{
+    heat_controller_t controller = ready_controller();
+    temperature_sample_t cold = sample(40.0f, 40.0f, true, 3U, HEAT_FAULT_NONE);
+    assert(heat_controller_command(&controller, &k_enable, &cold, 0U));
+    heat_controller_set_inhibit(&controller, true, 1000U);
+    heat_controller_set_inhibit(&controller, false, 2000U);
+    assert(!heat_controller_snapshot(&controller).inhibited);
+
+    heat_controller_step(&controller, &cold, 5999U);
+    assert(!heat_controller_snapshot(&controller).output_on);
+    heat_controller_step(&controller, &cold, 6000U);
+    assert(heat_controller_snapshot(&controller).output_on);
+    assert(heat_controller_snapshot(&controller).state == HEAT_STATE_HEATING);
+}
+
+static void test_enable_while_inhibited_stays_off(void)
+{
+    heat_controller_t controller = ready_controller();
+    temperature_sample_t cold = sample(40.0f, 40.0f, true, 3U, HEAT_FAULT_NONE);
+    heat_controller_set_inhibit(&controller, true, 0U);
+    assert(heat_controller_command(&controller, &k_enable, &cold, 100U));
+    const heat_controller_snapshot_t s = heat_controller_snapshot(&controller);
+    assert(s.enabled && !s.output_on && s.state == HEAT_STATE_HOLDING);
+}
+
+static void test_inhibit_does_not_mask_faults(void)
+{
+    heat_controller_t controller = ready_controller();
+    temperature_sample_t cold = sample(40.0f, 40.0f, true, 3U, HEAT_FAULT_NONE);
+    assert(heat_controller_command(&controller, &k_enable, &cold, 0U));
+    heat_controller_set_inhibit(&controller, true, 1000U);
+    temperature_sample_t hot = sample(85.0f, 85.0f, true, 4U, HEAT_FAULT_NONE);
+    heat_controller_step(&controller, &hot, 2000U);
+    const heat_controller_snapshot_t s = heat_controller_snapshot(&controller);
+    assert(s.state == HEAT_STATE_FAULT && s.fault == HEAT_FAULT_OVERTEMP);
+    assert(!s.enabled && !s.output_on);
+}
+
+static void test_disable_while_inhibited(void)
+{
+    heat_controller_t controller = ready_controller();
+    temperature_sample_t cold = sample(40.0f, 40.0f, true, 3U, HEAT_FAULT_NONE);
+    assert(heat_controller_command(&controller, &k_enable, &cold, 0U));
+    heat_controller_set_inhibit(&controller, true, 1000U);
+    const heat_controller_command_t disable = {.kind = HEAT_COMMAND_DISABLE};
+    assert(heat_controller_command(&controller, &disable, &cold, 2000U));
+    assert(heat_controller_snapshot(&controller).state == HEAT_STATE_IDLE);
+    assert(!heat_controller_snapshot(&controller).enabled);
+    heat_controller_set_inhibit(&controller, false, 3000U);
+    heat_controller_step(&controller, &cold, 60000U);
+    assert(!heat_controller_snapshot(&controller).output_on);
+}
+
 int main(void)
 {
+    test_inhibit_holds_output_off();
+    test_inhibit_release_waits_min_transition();
+    test_enable_while_inhibited_stays_off();
+    test_inhibit_does_not_mask_faults();
+    test_disable_while_inhibited();
     test_hysteresis();
     test_target_zero_disables();
     test_faults_bypass_minimum_interval();

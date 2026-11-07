@@ -20,8 +20,11 @@ typedef struct {
   uint32_t epoch;
   bool active;
 } printer_frame_t;
+/* ESP_OK: a print report whose command is push_status (or absent);
+ * has_state tells whether gcode_state was present. ESP_ERR_NOT_FOUND: valid
+ * JSON without such a report. Other errors: malformed. */
 esp_err_t printer_report_parse(const char *json, size_t len,
-                               printer_report_delta_t *out);
+                               printer_report_t *out);
 printer_frame_result_t printer_frame_feed(printer_frame_t *frame,
                                           const printer_fragment_t *part,
                                           const char **json, size_t *len);

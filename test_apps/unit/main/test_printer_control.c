@@ -22,47 +22,43 @@ TEST_CASE("MQTT queue has room for a dispatch and an SDK event",
   TEST_ESP_OK(first_result);
   TEST_ESP_OK(second_result);
 }
-/* Real coordinator task/mutex/service gate; all printer, storage and heat
- * boundaries are synthetic. This case never touches relays or a printer. */
-static atomic_uint acquisitions, resumes, random_sequence;
+/* Real coordinator task/mutex; all printer, storage and heat boundaries are
+ * synthetic. This case never touches relays or a printer. */
+static atomic_uint begins, ends;
+static atomic_bool active;
 static uint64_t now(void *ctx) {
   (void)ctx;
   return (uint64_t)(esp_timer_get_time() / 1000);
 }
-static esp_err_t acquire(uint64_t id, float target, uint64_t expiry,
-                         void *ctx) {
-  (void)id;
-  (void)target;
-  (void)expiry;
-  (void)ctx;
-  atomic_fetch_add(&acquisitions, 1);
-  return ESP_ERR_NOT_ALLOWED; /* e.g. a pending local target command */
-}
-static esp_err_t renew(uint64_t id, uint64_t expiry, void *ctx) {
-  (void)id;
-  (void)expiry;
-  (void)ctx;
-  return ESP_ERR_INVALID_STATE;
-}
-static void revoke(uint64_t id, void *ctx) {
-  (void)id;
-  (void)ctx;
-}
 static void heat(app_status_t *out, void *ctx) {
-  *out = app_status_initial();
-  out->target_c = 60;
-  out->temperature = (temperature_sample_t){.valid = true,
-                                            .consecutive_valid = 3,
-                                            .raw_c = 60,
-                                            .filtered_c = 60,
-                                            .timestamp_ms = now(ctx)};
-}
-static void automatic(runtime_auto_status_t *out, void *ctx) {
   (void)ctx;
-  *out = (runtime_auto_status_t){.teardown_applied = true};
+  *out = app_status_initial();
+  out->state = HEAT_STATE_HEATING;
+  out->enabled = true;
 }
-static esp_err_t configure(const printer_connection_config_t *value,
-                           void *ctx) {
+static esp_err_t monitor_begin(uint64_t until, void *ctx) {
+  (void)until;
+  (void)ctx;
+  atomic_fetch_add(&begins, 1);
+  atomic_store(&active, true);
+  return ESP_OK;
+}
+static esp_err_t monitor_permit(uint64_t until, void *ctx) {
+  (void)until;
+  (void)ctx;
+  return atomic_load(&active) ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+static void monitor_end(bool disable, void *ctx) {
+  (void)disable;
+  (void)ctx;
+  atomic_fetch_add(&ends, 1);
+  atomic_store(&active, false);
+}
+static bool monitor_active(void *ctx) {
+  (void)ctx;
+  return atomic_load(&active);
+}
+static esp_err_t configure(const printer_connection_config_t *value, void *ctx) {
   (void)value;
   (void)ctx;
   return ESP_OK;
@@ -71,41 +67,18 @@ static void tick(uint64_t at, void *ctx) {
   (void)at;
   (void)ctx;
 }
-static void snapshot(printer_observation_t *out, void *ctx) {
-  *out = (printer_observation_t){.connected = true,
-                                 .fresh = true,
-                                 .baseline_valid = true,
-                                 .startup_eligible = true,
-                                 .state = PRINTER_RUN_PAUSED,
-                                 .connection_epoch = 1,
-                                 .received_ms = now(ctx),
-                                 .job = {.identity_valid = true,
-                                         .connection_epoch = 1,
-                                         .print_epoch = 1,
-                                         .start_time = 100,
-                                         .label = "synthetic"}};
-}
-static printer_dispatch_result_t resume(uint64_t id,
-                                        const printer_job_key_t *job,
-                                        const printer_safety_history_t *history,
-                                        uint32_t epoch, uint64_t deadline,
-                                        void *ctx) {
-  (void)id;
-  (void)job;
-  (void)history;
-  (void)epoch;
-  (void)deadline;
+static void link_status(printer_link_status_t *out, void *ctx) {
   (void)ctx;
-  atomic_fetch_add(&resumes, 1);
-  return PRINTER_DISPATCH_REJECTED;
+  *out = (printer_link_status_t){.connected = true, .state_known = true,
+                                 .state = PRINTER_RUN_RUNNING,
+                                 .received_ms = now(NULL)};
 }
 static esp_err_t load(printer_connection_config_t *out, void *ctx) {
   (void)ctx;
   *out = (printer_connection_config_t){.enabled = true,
                                        .ipv4 = "192.168.1.20",
                                        .serial = "SYNTHETIC",
-                                       .access_code = "synthetic",
-                                       .ntp_host = "pool.ntp.org"};
+                                       .access_code = "synthetic"};
   return ESP_OK;
 }
 static esp_err_t save(const printer_connection_config_t *value, void *ctx) {
@@ -117,57 +90,37 @@ static esp_err_t clear(void *ctx) {
   (void)ctx;
   return ESP_ERR_INVALID_STATE;
 }
-static bool begin(service_operation_t owner, void *ctx) {
+static bool gate_begin(service_operation_t owner, void *ctx) {
   (void)ctx;
   return service_operation_begin(owner);
 }
-static void end(service_operation_t owner, void *ctx) {
+static void gate_end(service_operation_t owner, void *ctx) {
   (void)ctx;
   service_operation_end(owner);
 }
-static void random_bytes(void *out, size_t n, void *ctx) {
-  (void)ctx;
-  unsigned sequence = atomic_fetch_add(&random_sequence, 1);
-  unsigned char *p = out;
-  for (size_t i = 0; i < n; ++i)
-    p[i] = (unsigned char)(sequence + i * 17);
-}
-TEST_CASE("printer boot restores monitoring without heat or Resume",
+TEST_CASE("printer boot restores monitoring readiness without monitoring",
           "[printer_control]") {
-  static const printer_control_ops_t ops = {.heat_acquire = acquire,
-                                            .heat_renew = renew,
-                                            .heat_revoke = revoke,
-                                            .heat_snapshot = heat,
-                                            .auto_snapshot = automatic,
-                                            .link_configure = configure,
-                                            .link_tick = tick,
-                                            .link_snapshot = snapshot,
-                                            .link_resume = resume,
-                                            .load_config = load,
-                                            .save_config = save,
-                                            .clear_config = clear,
-                                            .gate_begin = begin,
-                                            .gate_end = end,
-                                            .now_ms = now,
-                                            .random_bytes = random_bytes,
-                                            .resume_qualified = true};
+  static const printer_control_ops_t ops = {
+      .heat_snapshot = heat, .monitor_begin = monitor_begin,
+      .monitor_permit = monitor_permit, .monitor_end = monitor_end,
+      .monitor_active = monitor_active, .link_configure = configure,
+      .link_tick = tick, .link_status = link_status, .load_config = load,
+      .save_config = save, .clear_config = clear, .gate_begin = gate_begin,
+      .gate_end = gate_end, .now_ms = now};
   TEST_ESP_OK(printer_control_start_with_ops(&ops));
   printer_control_status_t status = {0};
   uint64_t deadline = now(NULL) + 2000;
   do {
     vTaskDelay(pdMS_TO_TICKS(100));
     printer_control_get_status(&status);
-  } while (!status.can_arm && now(NULL) < deadline);
-  TEST_ASSERT_TRUE(status.configured && status.can_arm);
-  TEST_ASSERT_EQUAL_UINT32(0, atomic_load(&acquisitions));
-  TEST_ASSERT_EQUAL_UINT32(0, atomic_load(&resumes));
-  printer_arm_request_t request = {.initial_pause_confirmed = true};
-  strcpy(request.arm_token, status.cycle.arm_token);
-  TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, printer_control_arm(&request));
+  } while (!status.can_monitor && now(NULL) < deadline);
+  TEST_ASSERT_TRUE(status.configured && status.can_monitor);
+  TEST_ASSERT_EQUAL_UINT32(0, atomic_load(&begins));
+  TEST_ESP_OK(printer_control_monitor_start());
+  TEST_ASSERT_EQUAL_UINT32(1, atomic_load(&begins));
   TEST_ASSERT_EQUAL(SERVICE_OPERATION_NONE, service_operation_current());
-  TEST_ASSERT_EQUAL_UINT32(1, atomic_load(&acquisitions));
-  TEST_ESP_OK(printer_control_stop());
-  TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, printer_control_arm(&request));
-  TEST_ASSERT_EQUAL_UINT32(1, atomic_load(&acquisitions));
-  TEST_ASSERT_EQUAL_UINT32(0, atomic_load(&resumes));
+  TEST_ESP_OK(printer_control_monitor_stop());
+  TEST_ASSERT_EQUAL_UINT32(1, atomic_load(&ends));
+  TEST_ESP_OK(printer_control_monitor_stop());
+  TEST_ASSERT_EQUAL_UINT32(1, atomic_load(&ends));
 }

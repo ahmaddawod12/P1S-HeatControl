@@ -99,8 +99,7 @@ static app_status_t wait_status(bool ready, bool heat, uint32_t timeout)
         if ((!ready || status.temperature.consecutive_valid >= 3) && status.heater_on == heat) return status;
         vTaskDelay(pdMS_TO_TICKS(20));
     } while (now_ms() - start < timeout);
-    runtime_auto_status_t a;app_runtime_get_auto_status(&a);
-    fprintf(stderr,"wait wanted heat=%d ready=%d: state=%d enabled=%d heat=%d fault=%d temp=%.2f streak=%u auto=%d id=%llu ended=%llu\n",heat,ready,status.state,status.enabled,status.heater_on,status.fault,status.temperature.filtered_c,status.temperature.consecutive_valid,a.active,(unsigned long long)a.cycle_id,(unsigned long long)a.last_ended_id);
+    fprintf(stderr,"wait wanted heat=%d ready=%d: state=%d enabled=%d heat=%d fault=%d temp=%.2f streak=%u monitor=%d\n",heat,ready,status.state,status.enabled,status.heater_on,status.fault,status.temperature.filtered_c,status.temperature.consecutive_valid,app_runtime_monitor_active());
     assert(!"controller did not reach expected state");
     return status;
 }
@@ -116,34 +115,13 @@ static void enable(void)
     (void) wait_status(true, true, 7000);
     assert(atomic_load(&heater));
 }
-static void automatic_lease_expires_without_producer(void)
-{
-    start();
-    assert(app_runtime_auto_acquire(1,60.0f,now_ms()+5000)==ESP_OK);
-    (void)wait_status(true,true,2000);
-    assert(app_runtime_set_target(55.0f)==ESP_ERR_NOT_ALLOWED);
-    assert(app_runtime_set_enabled(true)==ESP_ERR_NOT_ALLOWED);
-    assert(app_runtime_set_manual_fan(true)==ESP_OK);
-    (void)wait_status(true,false,6000);
-    runtime_auto_status_t a;app_runtime_get_auto_status(&a);
-    assert(!a.active&&a.teardown_applied&&a.last_ended_id==1);
-    assert(app_runtime_auto_renew(1,now_ms()+5000)==ESP_ERR_INVALID_STATE);
-    assert(app_runtime_auto_acquire(1,60.0f,now_ms()+5000)==ESP_ERR_INVALID_STATE);
-    assert(app_runtime_auto_acquire(2,60.0f,now_ms()+5000)==ESP_OK);
-    (void)wait_status(true,true,2000);
-    for(unsigned i=0;i<100;i++)(void)app_runtime_set_manual_fan(true);
-    assert(app_runtime_set_enabled(false)==ESP_OK);
-    (void)wait_status(true,false,2000);
-    app_runtime_get_auto_status(&a);assert(!a.active&&a.teardown_applied);
-    app_runtime_stop();
-}
 static void urgent_disable_discards_previously_queued_enables(void)
 {
     start();
     for(unsigned round=0;round<20;round++) {
         enable();
         for(unsigned i=0;i<32;i++) (void)app_runtime_set_enabled(true);
-        if(round&1) app_runtime_auto_revoke(0);
+        if(round&1) app_runtime_monitor_end(true);
         else assert(app_runtime_set_enabled(false)==ESP_OK);
         (void)wait_status(true,false,2000);
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -243,9 +221,11 @@ static void calibration_applies_live_and_survives_restart(void)
     start();
     status = wait_calibration(-1.5f);
     assert(status.temperature.filtered_c == 23.5f && !status.enabled);
-    assert(app_runtime_auto_acquire(77, 60.0f, now_ms() + 5000U) == ESP_OK);
-    assert(app_runtime_set_calibration(1.0f) == ESP_ERR_NOT_ALLOWED);
-    app_runtime_auto_revoke(77);
+    /* Printer monitoring never blocks manual settings. */
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    assert(app_runtime_set_calibration(1.0f) == ESP_OK);
+    app_runtime_monitor_end(true);
     (void) wait_status(true, false, 2000U);
     app_runtime_stop();
     atomic_store(&saved_calibration, 0.0f);
@@ -318,10 +298,9 @@ static void blocked_save_does_not_delay_stale_shutdown(void)
     app_runtime_stop();
 }
 
-static void blocked_save_reserves_its_command_and_blocks_auto_acquisition(void)
+static void blocked_save_reserves_its_command(void)
 {
     start(); begin_blocked_save();
-    assert(app_runtime_auto_acquire(1, 60.0f, now_ms() + 5000) == ESP_ERR_NOT_ALLOWED);
     assert(app_runtime_set_target(56.0f) == ESP_ERR_TIMEOUT);
     for (unsigned i = 0; i < 64; ++i) (void) app_runtime_set_manual_fan((i & 1U) != 0);
     finish_blocked_save(ESP_OK);
@@ -344,7 +323,7 @@ static void failed_save_releases_reservation_without_changing_target(void)
     atomic_store(&save_result, ESP_OK);
     app_status_t status; app_runtime_get_status(&status);
     assert(status.target_c == 60.0f && !status.enabled);
-    assert(app_runtime_auto_acquire(1, 60.0f, now_ms() + 5000) == ESP_OK);
+    assert(app_runtime_set_enabled(true) == ESP_OK);
     app_runtime_stop();
 }
 
@@ -565,6 +544,86 @@ static void runtime_records_transition_history(void)
     app_runtime_stop();
 }
 
+static void wait_monitor_inactive(uint32_t timeout)
+{
+    const uint64_t start_ms = now_ms();
+    while (app_runtime_monitor_active()) {
+        assert(now_ms() - start_ms < timeout);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+static void monitor_requires_enabled_heating(void)
+{
+    start();
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_ERR_NOT_ALLOWED);
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 6000U) == ESP_ERR_INVALID_ARG);
+    assert(!app_runtime_monitor_active());
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    assert(app_runtime_monitor_active());
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_ERR_NOT_ALLOWED);
+    assert(app_runtime_monitor_permit(now_ms() + 6000U) == ESP_ERR_INVALID_ARG);
+    app_runtime_monitor_end(false);
+    assert(app_runtime_monitor_permit(now_ms() + 1000U) == ESP_ERR_INVALID_STATE);
+    app_runtime_stop();
+}
+static void monitor_expired_permit_holds_heater(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 1000U) == ESP_OK);
+    const app_status_t held = wait_status(true, false, 3000);
+    assert(held.enabled);
+    assert(atomic_load(&fan)); /* normal cooldown after the element switches off */
+    bool heating = false;
+    for (unsigned i = 0; i < 40 && !heating; ++i) {
+        assert(app_runtime_monitor_permit(now_ms() + 5000U) == ESP_OK);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        heating = atomic_load(&heater);
+    }
+    assert(heating);
+    app_runtime_stop();
+}
+static void monitor_disable_then_enable(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(0) == ESP_OK);
+    (void) wait_status(true, false, 2000);
+    assert(app_runtime_set_enabled(false) == ESP_OK);
+    wait_monitor_inactive(1000);
+    enable();
+    app_runtime_stop();
+}
+static void monitor_end_choices(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    app_runtime_monitor_end(false);
+    assert(!app_runtime_monitor_active());
+    vTaskDelay(pdMS_TO_TICKS(6000)); /* the old permit would have expired */
+    app_status_t status;
+    app_runtime_get_status(&status);
+    assert(status.enabled && atomic_load(&heater));
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    app_runtime_monitor_end(true);
+    assert(!app_runtime_monitor_active());
+    status = wait_status(true, false, 2000);
+    assert(!status.enabled);
+    app_runtime_stop();
+}
+static void monitor_maintenance_ends(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    assert(app_runtime_begin_maintenance(15000) == ESP_OK);
+    assert(!app_runtime_monitor_active());
+    assert(app_runtime_end_maintenance() == ESP_OK);
+    app_runtime_stop();
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -579,15 +638,18 @@ int main(int argc, char **argv)
         else if (strcmp(argv[1], "save_sensor") == 0) blocked_save_does_not_delay_sensor_fault();
         else if (strcmp(argv[1], "save_overtemp") == 0) blocked_save_does_not_delay_overtemperature();
         else if (strcmp(argv[1], "save_stale") == 0) blocked_save_does_not_delay_stale_shutdown();
-        else if (strcmp(argv[1], "save_queue") == 0) blocked_save_reserves_its_command_and_blocks_auto_acquisition();
+        else if (strcmp(argv[1], "save_queue") == 0) blocked_save_reserves_its_command();
         else if (strcmp(argv[1], "save_failure") == 0) failed_save_releases_reservation_without_changing_target();
         else if (strcmp(argv[1], "save_maintenance") == 0) maintenance_waits_for_an_admitted_save_without_blocking_outputs();
+        else if (strcmp(argv[1], "monitor_requires") == 0) monitor_requires_enabled_heating();
+        else if (strcmp(argv[1], "monitor_permit") == 0) monitor_expired_permit_holds_heater();
+        else if (strcmp(argv[1], "monitor_disable") == 0) monitor_disable_then_enable();
+        else if (strcmp(argv[1], "monitor_end") == 0) monitor_end_choices();
+        else if (strcmp(argv[1], "monitor_maintenance") == 0) monitor_maintenance_ends();
         else assert(!"unknown runtime persistence scenario");
         puts("runtime persistence safety regression passed");
         return 0;
     }
-    fprintf(stderr,"automatic lease test\n");
-    automatic_lease_expires_without_producer();
     fprintf(stderr,"urgent queue test\n");
     urgent_disable_discards_previously_queued_enables();
     fprintf(stderr,"existing maintenance tests\n");

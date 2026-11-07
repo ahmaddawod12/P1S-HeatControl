@@ -65,7 +65,6 @@
   var firmwareTimer = null;
   var firmwareFetching = false;
   var wifiChanging = false;
-  var printerActive = false;
   var updateRequested = false;
   var updateRequestUncertain = false;
 
@@ -166,18 +165,18 @@
       status.valid === true &&
       status.consecutive_valid >= 3 &&
       status.target_c > 0;
-    el.enable.disabled = locked || printerActive || status.enabled === true || !readyToEnable;
-    el.disable.disabled = busy || (status.enabled !== true && !maintenanceActive() && !printerActive);
+    el.enable.disabled = locked || status.enabled === true || !readyToEnable;
+    el.disable.disabled = busy || (status.enabled !== true && !maintenanceActive());
     var manualFanOn = status.manual_fan_on === true;
     el.fanToggle.disabled = locked;
     el.fanToggle.setAttribute('aria-pressed', manualFanOn ? 'true' : 'false');
     el.fanToggle.textContent = manualFanOn
       ? 'Stop manual fan'
       : 'Run fan manually';
-    el.slider.disabled = locked || printerActive;
-    el.number.disabled = locked || printerActive;
-    el.calibration.disabled = locked || printerActive;
-    el.calibrationSave.disabled = locked || printerActive;
+    el.slider.disabled = locked;
+    el.number.disabled = locked;
+    el.calibration.disabled = locked;
+    el.calibrationSave.disabled = locked;
 
     el.ip.textContent = status.ip_addr || '--';
     el.rssi.textContent = status.wifi_rssi ? status.wifi_rssi + ' dBm' : '--';
@@ -248,7 +247,6 @@
   }
 
   function commitTarget(value) {
-    if (printerActive) { setMessage('Stop chamber control before changing its target.', 'error'); return; }
     var target = Math.round(value * 2) / 2;
     if (!isFinite(target) || target < 0 || target > 80) {
       setMessage('Target must be between 0 and 80 °C.', 'error');
@@ -287,7 +285,6 @@
   });
 
   el.enable.addEventListener('click', function () {
-    if (printerActive) return;
     postCommand('/api/control/enable', 'Heating enabled.');
   });
 
@@ -297,7 +294,7 @@
   });
 
   el.calibrationSave.addEventListener('click', function () {
-    if (busy || maintenanceActive() || printerActive) return;
+    if (busy || maintenanceActive()) return;
     var draft = el.calibration.value;
     var offset = Number(draft);
     if (!draft.trim() || !isFinite(offset) || offset < -10 || offset > 10) {
@@ -374,7 +371,7 @@
     rebooting: 'Restarting the controller. Waiting to reconnect…', trial: 'Checking firmware after restart…'
   };
   function renderFirmware() {
-    el.firmwareUpdate.disabled = !firmware || !firmware.csrf_token || printerActive || wifiChanging || updateRequested || firmwareBusy() || maintenanceActive();
+    el.firmwareUpdate.disabled = !firmware || !firmware.csrf_token || wifiChanging || updateRequested || firmwareBusy() || maintenanceActive();
     if (!firmware) return;
     el.firmwareVersion.textContent = firmware.installed || '--';
     var message = FIRMWARE_PHASES[firmware.phase] || FIRMWARE_MESSAGES[firmware.result] || 'Firmware update failed.';
@@ -422,7 +419,7 @@
     });
   }
   el.firmwareUpdate.addEventListener('click', function () {
-    if (!firmware || !firmware.csrf_token || printerActive || wifiChanging || updateRequested || firmwareBusy() || maintenanceActive()) return;
+    if (!firmware || !firmware.csrf_token || wifiChanging || updateRequested || firmwareBusy() || maintenanceActive()) return;
     updateRequested = true;
     updateRequestUncertain = false;
     firmware.phase = 'checking';
@@ -445,11 +442,6 @@
 
   refreshStatus();
   if (typeof window.addEventListener === 'function') {
-    window.addEventListener('p1s-printer-control', function (event) {
-      printerActive = !!(event.detail && event.detail.active);
-      if (lastStatus) render(lastStatus);
-      renderFirmware();
-    });
     window.addEventListener('p1s-wifi-changing', function (event) {
       wifiChanging = !!event.detail; renderFirmware();
     });

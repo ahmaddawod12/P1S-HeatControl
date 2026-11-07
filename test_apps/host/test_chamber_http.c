@@ -19,6 +19,7 @@ static char response_status[64], response_body[1024], emitted[API_SSE_FRAME_BYTE
 static app_status_t fixture;
 static unsigned commands, receives, broadcasts, ticks;
 static unsigned printer_stops;
+static esp_err_t sse_init_result;
 static uint64_t monotonic_ms;
 static esp_err_t command_result;
 static enum { NORMAL, TIMEOUT, TRICKLE, DISCONNECTED, SLOW_FINAL } receive_mode;
@@ -115,12 +116,11 @@ static esp_err_t printer_config(const printer_config_request_t *value) {
     assert(value->value.enabled && !strcmp(value->value.serial,"P1S123"));
     ++commands;return command_result;
 }
-static esp_err_t printer_arm(const printer_arm_request_t *value) {
-    assert(value->initial_pause_confirmed);++commands;return command_result;
-}
+static esp_err_t printer_start(void) {++commands;return command_result;}
 static esp_err_t printer_stop(void) {++printer_stops;return command_result;}
 service_operation_t service_operation_current(void) {return SERVICE_OPERATION_NONE;}
 size_t sse_hub_client_count(void) {return 1;}
+esp_err_t sse_hub_init(void) {return sse_init_result;}
 void sse_hub_broadcast(const char *frame,size_t length) {
     assert(length<sizeof(emitted));memcpy(emitted,frame,length);emitted[length]=0;++broadcasts;
 }
@@ -138,8 +138,8 @@ static void reset(void) {
     s_ops=(web_server_ops_t){.get_status=status,.set_target=target,.set_enabled=enabled,
         .set_manual_fan=fan,.ack_fault=ack,.set_calibration=calibration,
         .request_firmware_update=update,.request_wifi_change=wifi_change,
-        .request_printer_config=printer_config,.arm_printer_cycle=printer_arm,
-        .forget_printer_config=ack,.stop_printer_cycle=printer_stop};
+        .request_printer_config=printer_config,.start_printer_monitor=printer_start,
+        .forget_printer_config=ack,.stop_printer_monitor=printer_stop};
     assert(firmware_api_register((void *)1,&s_ops)==ESP_OK);
     assert(wifi_api_register((void *)1,&s_ops)==ESP_OK);
     assert(printer_api_register((void *)1,&s_ops)==ESP_OK);
@@ -274,8 +274,8 @@ static const struct {
     {"/api/wifi",HTTP_PUT,"{\"ssid\":\"network\",\"password\":\"password\"}","202"},
     {"/api/printer/config",HTTP_PUT,"{\"enabled\":true,\"ipv4\":\"192.168.1.12\",\"serial\":\"P1S123\",\"access_code\":\"password\"}","202"},
     {"/api/printer/config",HTTP_DELETE,"{}","204"},
-    {"/api/printer/cycle",HTTP_POST,"{\"arm_token\":\"0123456789abcdef0123456789abcdef\",\"initial_pause_confirmed\":true}","202"},
-    {"/api/printer/cycle/stop",HTTP_POST,"{}","204"},
+    {"/api/printer/monitor",HTTP_POST,"{}","204"},
+    {"/api/printer/monitor/stop",HTTP_POST,"{}","204"},
 };
 static void test_service_rejection(void) {
     for(size_t i=0;i<sizeof(service_mutations)/sizeof(service_mutations[0]);++i) {
@@ -368,6 +368,11 @@ int main(int argc,char **argv) {
     else if(!strcmp(argv[1],"get_body"))test_get_body();
     else if(!strcmp(argv[1],"final_chunk"))test_chamber_final_chunk();
     else if(!strcmp(argv[1],"acknowledgement"))test_acknowledgement_refusal();
+    else if(!strcmp(argv[1],"sse_init")) {
+        const web_server_config_t config={.ops=s_ops,.port=80};
+        sse_init_result=ESP_ERR_NO_MEM;
+        assert(web_server_start(&config)==ESP_ERR_NO_MEM && s_server==NULL);
+    }
     else if(!strcmp(argv[1],"sse"))test_sse();else assert(!"unknown scenario");
     printf("chamber HTTP %s passed\n",argv[1]);return 0;
 }

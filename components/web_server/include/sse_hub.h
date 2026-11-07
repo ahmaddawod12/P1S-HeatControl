@@ -7,6 +7,10 @@
 
 #define SSE_HUB_MAX_CLIENTS 4
 
+/* Call from serialized server startup before HTTP/broadcast tasks can use the
+ * hub. Initialization is retained across server stop/start cycles. */
+esp_err_t sse_hub_init(void);
+
 /* Detaches `req` and keeps its socket open as an event stream. Returns
  * ESP_ERR_NO_MEM once SSE_HUB_MAX_CLIENTS streams are already registered. */
 esp_err_t sse_hub_add_client(httpd_req_t *req);

@@ -51,7 +51,14 @@ static void queue_event(const network_event_t *event)
 }
 static void got_ip_event(void *arg,esp_event_base_t base,int32_t id,void *data)
 {
-    (void)arg; (void)base; (void)id;
+    (void)arg; (void)base;
+    if (id==IP_EVENT_STA_LOST_IP) {
+        const network_event_t event={.pending=true,.result=WIFI_RESULT_CONNECTING};
+        queue_event(&event);
+        ESP_LOGW(TAG,"station IP lost; starting network recovery");
+        return;
+    }
+    if (id!=IP_EVENT_STA_GOT_IP || data==NULL) return;
     const ip_event_got_ip_t *got=data;
     wifi_ap_record_t ap;
     if (esp_wifi_sta_get_ap_info(&ap)!=ESP_OK) return;
@@ -238,7 +245,7 @@ static esp_err_t init_stack(void)
         stage=STACK_WIFI_HANDLER;
     }
     if (stage<STACK_IP_HANDLER) {
-        err=esp_event_handler_instance_register(IP_EVENT,IP_EVENT_STA_GOT_IP,got_ip_event,NULL,NULL);
+        err=esp_event_handler_instance_register(IP_EVENT,ESP_EVENT_ANY_ID,got_ip_event,NULL,NULL);
         if (err!=ESP_OK) return err;
         stage=STACK_IP_HANDLER;
     }

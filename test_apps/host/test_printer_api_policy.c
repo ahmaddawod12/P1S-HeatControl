@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 static httpd_uri_t routes[5];
-static unsigned route_count, arm_calls, stop_calls, config_calls;
+static unsigned route_count, start_calls, stop_calls, config_calls;
 static const char *input, *type = "application/json";
 static bool trusted = true;
 static bool connection_closed;
@@ -113,9 +113,8 @@ const char *firmware_api_csrf_token(void) {
   return "abcdefabcdefabcdefabcdefabcdefab";
 }
 static void get(printer_control_status_t *out) { *out = status; }
-static esp_err_t arm(const printer_arm_request_t *r) {
-  assert(r->initial_pause_confirmed);
-  return arm_calls++ ? ESP_ERR_NOT_ALLOWED : ESP_OK;
+static esp_err_t start(void) {
+  return start_calls++ ? ESP_ERR_NOT_ALLOWED : ESP_OK;
 }
 static esp_err_t stop(void) {
   ++stop_calls;
@@ -142,40 +141,17 @@ static void request(httpd_method_t method, const char *path, const char *body,
     }
   assert(0);
 }
-static void test_printer_api_rejects_ambiguous_body(void) {
-  printer_arm_request_t r;
-  const char *valid = "{\"arm_token\":\"0123456789abcdef0123456789abcdef\","
-                      "\"initial_pause_confirmed\":true}";
-  assert(printer_api_parse_arm(valid, strlen(valid), &r));
-  const char duplicate_json[] =
-      "{\"arm_token\":\"0123456789abcdef0123456789abcdef\",\"initial_pause_"
-      "confirmed\":true,\"arm_token\":\"0123456789abcdef0123456789abcdef\"}";
-  assert(
-      !printer_api_parse_arm(duplicate_json, sizeof(duplicate_json) - 1, &r));
-  const char *bad[] = {"{}",
-                       "[]",
-                       "{\"arm_token\":3}",
-                       "{\"initial_pause_confirmed\":false}",
-                       "{\"unknown\":true}",
-                       "{\"arm_token\":\"\\u0000\"}",
-                       "{\"arm_token\":{}}"};
-  for (unsigned i = 0; i < sizeof(bad) / sizeof(*bad); ++i)
-    assert(!printer_api_parse_arm(bad[i], strlen(bad[i]), &r));
-  char padded[1026];
-  memset(padded, ' ', sizeof(padded));
-  memcpy(padded, valid, strlen(valid));
-  assert(printer_api_parse_arm(padded, 1024, &r));
-  assert(!printer_api_parse_arm(padded, 1025, &r));
-  padded[strlen(valid)] = 0;
-  assert(!printer_api_parse_arm(padded, 1024, &r));
-  snprintf(padded, sizeof(padded), "%s {}", valid);
-  assert(!printer_api_parse_arm(padded, strlen(padded), &r));
+static void test_printer_api_parses_config(void) {
   printer_config_request_t c;
   const char good[] =
       "{\"enabled\":true,\"ipv4\":\"192.168.1.20\",\"serial\":\"SERIAL123\","
-      "\"access_code\":\"SecretAccess\",\"ntp_host\":\"lan.example\"}";
+      "\"access_code\":\"SecretAccess\"}";
   assert(printer_api_parse_config(good, sizeof(good) - 1, &c) &&
          c.access_code_present);
+  const char time_server[] =
+      "{\"enabled\":true,\"ipv4\":\"192.168.1.20\",\"serial\":\"SERIAL123\","
+      "\"access_code\":\"SecretAccess\",\"ntp_host\":\"lan.example\"}";
+  assert(!printer_api_parse_config(time_server, sizeof(time_server) - 1, &c));
   const char omitted[] =
       "{\"enabled\":true,\"ipv4\":\"192.168.1.20\",\"serial\":\"SERIAL123\"}";
   assert(printer_api_parse_config(omitted, sizeof(omitted) - 1, &c) &&
@@ -198,42 +174,56 @@ static void test_printer_status_never_contains_code(void) {
   assert(printer_api_status_json(&status, "csrf", response, 8) ==
              ESP_ERR_INVALID_SIZE &&
          !response[0]);
-  memset(status.observation.job.file, 1,
-         sizeof(status.observation.job.file) - 1);
-  esp_err_t e =
-      printer_api_status_json(&status, "csrf", response, sizeof(response));
-  assert(e == ESP_ERR_INVALID_SIZE || e == ESP_OK);
-  if (e == ESP_OK) {
-    j = cJSON_Parse(response);
-    assert(j);
-    cJSON_Delete(j);
-  } else
-    assert(!response[0]);
-  status.observation.job.file[0] = 0;
+}
+static void test_printer_status_shape(void) {
+  printer_control_status_t s = {.configured = true, .enabled = true,
+                                .can_monitor = false};
+  s.link = (printer_link_status_t){.connected = true, .state_known = true,
+                                   .state = PRINTER_RUN_PAUSED, .reconnects = 3};
+  s.monitor = (printer_monitor_status_t){.phase = PRINTER_MONITOR_WATCHING,
+                                         .hold = PRINTER_HOLD_PAUSED,
+                                         .last_end = PRINTER_MONITOR_END_NONE};
+  strcpy(s.reason, "monitoring");
+  assert(printer_api_status_json(&s, "csrf", response, sizeof(response)) == ESP_OK);
+  assert(strstr(response, "\"can_monitor\":false") && !strstr(response, "ntp_host"));
+  assert(strstr(response, "\"printer_state\":\"paused\""));
+  assert(strstr(response, "\"reconnects\":3"));
+  assert(strstr(response, "\"monitor\":{\"phase\":\"watching\",\"hold\":\"paused\","
+                          "\"last_end\":\"none\",\"wait_remaining_ms\":0}"));
+  assert(!strstr(response, "arm_token") && !strstr(response, "\"cycle\"") &&
+         !strstr(response, "job_label") && !strstr(response, "progress"));
+  s.link.state_known = false;
+  s.monitor = (printer_monitor_status_t){.last_end = PRINTER_MONITOR_END_NO_PRINT};
+  s.wait_remaining_ms = 0;
+  assert(printer_api_status_json(&s, "csrf", response, sizeof(response)) == ESP_OK);
+  assert(strstr(response, "\"printer_state\":\"unknown\""));
+  assert(strstr(response, "\"phase\":\"off\"") && strstr(response, "\"last_end\":\"no_print\""));
 }
 int main(void) {
   test_status_allocation_failure_releases_memory();
-  test_printer_api_rejects_ambiguous_body();
+  test_printer_api_parses_config();
   test_printer_status_never_contains_code();
+  test_printer_status_shape();
   web_server_ops_t ops = {.get_printer_status = get,
                           .request_printer_config = config,
                           .forget_printer_config = forget,
-                          .arm_printer_cycle = arm,
-                          .stop_printer_cycle = stop};
+                          .start_printer_monitor = start,
+                          .stop_printer_monitor = stop};
   assert(printer_api_register((void *)1, &ops) == ESP_OK && route_count == 5);
-  const char *body = "{\"arm_token\":\"0123456789abcdef0123456789abcdef\","
-                     "\"initial_pause_confirmed\":true}";
+  const char *body = "{}";
   request(HTTP_GET, "/api/printer", "", 200);
   trusted = false;
-  request(HTTP_POST, "/api/printer/cycle", body, 403);
-  assert(!arm_calls);
+  request(HTTP_POST, "/api/printer/monitor", body, 403);
+  assert(!start_calls);
   trusted = true;
   type = "text/plain";
-  request(HTTP_POST, "/api/printer/cycle", body, 400);
+  request(HTTP_POST, "/api/printer/monitor", body, 400);
   type = "application/json";
-  request(HTTP_POST, "/api/printer/cycle", body, 202);
-  request(HTTP_POST, "/api/printer/cycle", body, 409);
-  request(HTTP_POST, "/api/printer/cycle/stop", "{}", 204);
+  request(HTTP_POST, "/api/printer/monitor", "{\"x\":1}", 400);
+  assert(!start_calls);
+  request(HTTP_POST, "/api/printer/monitor", body, 204);
+  request(HTTP_POST, "/api/printer/monitor", body, 409);
+  request(HTTP_POST, "/api/printer/monitor/stop", "{}", 204);
   request(HTTP_DELETE, "/api/printer/config", "", 204);
   assert(stop_calls == 1);
   request(HTTP_PUT, "/api/printer/config",

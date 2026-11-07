@@ -39,9 +39,11 @@
     </p>
     <div class="button-row">
       <button type="button" id="enable-button" class="primary">Enable heating</button>
+      <button type="button" id="monitor-button" aria-pressed="false" disabled>Monitor P1S</button>
       <button type="button" id="disable-button">Disable</button>
       <button type="button" id="fan-toggle-button" aria-pressed="false">Run fan manually</button>
     </div>
+    <p class="hint" id="monitor-status" role="status" aria-live="polite"></p>
   </section>
 
   <section class="card" aria-labelledby="calibration-heading">
@@ -71,22 +73,11 @@
   </section>
 
   <section class="card printer-card" aria-labelledby="printer-heading">
-    <h2 id="printer-heading">Printer &amp; chamber cycle</h2>
+    <h2 id="printer-heading">Printer</h2>
     <p class="secondary" id="printer-connection">Reading printer status…</p>
     <dl class="details printer-details">
-      <dt>Job</dt><dd id="printer-job">No job observed</dd>
-      <dt>Progress</dt><dd id="printer-progress">—</dd>
+      <dt>State</dt><dd id="printer-state">—</dd>
     </dl>
-    <p class="hint" id="printer-workflow">Prepare and submit the complete job from your PC using a tested pause before all extrusion. The ESP32 can then preheat and resume that waiting job.</p>
-    <label class="printer-check" for="printer-confirm">
-      <input type="checkbox" id="printer-confirm" aria-describedby="printer-workflow">
-      <span>I confirm this is the intentional initial pause, before any extrusion.</span>
-    </label>
-    <div class="button-row">
-      <button type="button" id="printer-preheat" class="primary" disabled>Preheat &amp; Resume</button>
-      <button type="button" id="printer-stop" disabled>Stop chamber control</button>
-    </div>
-    <p class="hint">Stopping chamber control does not cancel the print. Manual fan control remains available.</p>
     <p class="hint printer-message" id="printer-message" role="status" aria-live="polite">Reading printer status…</p>
     <details id="printer-settings">
       <summary>Printer connection</summary>
@@ -103,11 +94,6 @@
           <label for="printer-access-code">LAN access code</label>
           <input type="password" id="printer-access-code" maxlength="64" autocomplete="new-password" autocapitalize="none" spellcheck="false" aria-describedby="printer-code-help">
           <p class="hint" id="printer-code-help">Write only. Leave blank to keep the saved code for the same serial number.</p>
-        </div>
-        <div class="printer-field">
-          <label for="printer-ntp">Time server</label>
-          <input type="text" id="printer-ntp" maxlength="253" value="pool.ntp.org" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="printer-time-help">
-          <p class="hint" id="printer-time-help">Use a reachable LAN time server when the controller has no internet access.</p>
         </div>
         <label class="printer-check" for="printer-enabled"><input type="checkbox" id="printer-enabled"><span>Enable printer monitoring</span></label>
         <div class="button-row printer-form-actions">

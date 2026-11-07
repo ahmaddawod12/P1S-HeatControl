@@ -14,17 +14,7 @@ static bounded_t *get(esp_transport_handle_t t) {
 }
 static int connect_wire(esp_transport_handle_t t, const char *h, int port,
                         int timeout) {
-  bounded_t *b = get(t);
-  int result = esp_transport_connect(b->inner, h, port, timeout);
-  /* TLS writes must return WANT_READ/WRITE, never block past the outer budget.
-   * This runs in the MQTT task, before any application publish can be admitted.
-   */
-  if (result == 0 &&
-      !printer_socket_nonblocking(esp_transport_get_socket(b->inner))) {
-    esp_transport_close(b->inner);
-    return -1;
-  }
-  return result;
+  return esp_transport_connect(get(t)->inner, h, port, timeout);
 }
 static int read_wire(esp_transport_handle_t t, char *data, int len, int ms) {
   return esp_transport_read(get(t)->inner, data, len, ms);
@@ -50,7 +40,20 @@ static int write_wire(esp_transport_handle_t t, const char *data, int len,
        */
       if (!b->allowed(b->ctx) || b->now(b->ctx) >= b->deadline)
         return -1;
-      return esp_transport_write(b->inner, data, len, 0);
+      /* MQTT serializes TLS reads/writes with its API mutex. Preserve the
+       * SDK's normal receive mode: permanent O_NONBLOCK can turn an incomplete
+       * TLS record into a successful-but-truncated MQTT PUBLISH delivery. */
+      int saved_flags;
+      const int fd = esp_transport_get_socket(b->inner);
+      if (!printer_socket_nonblocking_begin(fd, &saved_flags)) return -1;
+      int result = -1;
+      if (b->allowed(b->ctx) && b->now(b->ctx) < b->deadline)
+        result = esp_transport_write(b->inner, data, len, 0);
+      if (!printer_socket_restore(fd, saved_flags)) {
+        (void)esp_transport_close(b->inner);
+        return -1;
+      }
+      return result;
     }
   }
   /* Rechecked for every partial MQTT write, using one absolute deadline. */

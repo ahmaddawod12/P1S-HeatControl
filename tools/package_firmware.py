@@ -56,9 +56,16 @@ def image_metadata(image, public_key, version, personal=False):
     verify_signature(image, public_key)
     from esptool.bin_image import LoadFirmwareImage
     try:
-        LoadFirmwareImage("esp32", blob).verify()
+        application = LoadFirmwareImage("esp32", blob)
+        application.verify()
     except Exception as exc:
         raise ValueError("invalid ESP32 application image") from exc
+    # Inspect loadable application data, not the outer signature or a possibly
+    # changed key file in the build tree. A stale application must not silently
+    # switch the trust root used for subsequent OTA verification.
+    key_bytes = Path(public_key).read_bytes()
+    require(any(key_bytes in segment.data for segment in application.segments),
+            "embedded verification key does not match the signing key")
     return {"format": 1, "product": "p1s-heat-controller", "hardware": "esp32-wroom-32",
         "layout": "p1s-4m-ota-v1", "version": version, "filename": IMAGE_NAME,
         "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()}
@@ -79,7 +86,31 @@ def validate_layout(build):
     require(bootloader.is_file() and 0 < bootloader.stat().st_size <= 0x7000,
             "bootloader overlaps partition table")
 
-def validate_generic_build(build, version):
+def validate_update_security(build, description, config, public_key):
+    require(not config.get("SECURE_FLASH_ENC_ENABLED"),
+            "flash encryption must be disabled; installation must not burn encryption eFuses")
+    require(not config.get("SECURE_BOOT") and not config.get("BOOTLOADER_APP_ANTI_ROLLBACK"),
+            "build must not introduce hardware security fuse changes")
+    for key in ("BOOTLOADER_APP_ROLLBACK_ENABLE", "SECURE_SIGNED_APPS_NO_SECURE_BOOT",
+                "SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT"):
+        require(config.get(key) is True, "required update protection is disabled")
+    require(config.get("SECURE_SIGNED_APPS_ECDSA_SCHEME") is True,
+            "build must use the ECDSA signature scheme")
+    key_name = config.get("SECURE_BOOT_VERIFICATION_KEY")
+    require(isinstance(key_name, str) and key_name, "missing OTA verification key")
+    configured_key = Path(key_name)
+    if not configured_key.is_absolute():
+        project = description.get("project_path")
+        require(isinstance(project, str) and Path(project).is_absolute(),
+                "project directory is required to resolve the verification key")
+        configured_key = Path(project) / configured_key
+    require(configured_key.is_file(), "configured OTA verification key is missing")
+    expected_key = Path(public_key).read_bytes()
+    require(len(expected_key) == 64 and configured_key.read_bytes() == expected_key,
+            "configured OTA verification key does not match the signing key")
+
+
+def validate_generic_build(build, version, public_key):
     description = json.loads((build / "project_description.json").read_text(encoding="utf-8"))
     require(description.get("target") == "esp32" and description.get("project_name") == "p1s_heat_controller"
         and description.get("project_version") == version, "wrong project/target/version")
@@ -89,10 +120,7 @@ def validate_generic_build(build, version):
             "release contains personal Wi-Fi configuration")
     require(config.get("IDF_TARGET") == "esp32" and config.get("ESPTOOLPY_FLASHSIZE") == "4MB"
         and config.get("P1S_RELAY_ACTIVE_LOW") is False, "wrong hardware profile")
-    for key in ("BOOTLOADER_APP_ROLLBACK_ENABLE", "SECURE_SIGNED_APPS_NO_SECURE_BOOT", "SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT"):
-        require(config.get(key) is True, "required update protection is disabled")
-    require(not config.get("SECURE_BOOT") and not config.get("BOOTLOADER_APP_ANTI_ROLLBACK"),
-            "release must not introduce hardware security fuse changes")
+    validate_update_security(build, description, config, public_key)
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
     entries = [line.split("=", 1)[1] for line in cache.splitlines() if line.startswith("P1S_BOOTSTRAP_CREDENTIALS:")]
     require(entries == ["OFF"], "personal bootstrap builds cannot be released")
@@ -107,9 +135,7 @@ def validate_bootstrap(build_dir, public_key, version):
         and description.get("project_version") == version, "wrong bootstrap project/target/version")
     require(config.get("ESPTOOLPY_FLASHSIZE") == "4MB" and config.get("P1S_RELAY_ACTIVE_LOW") is False,
             "wrong bootstrap hardware profile")
-    require(config.get("SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT") is True
-        and config.get("BOOTLOADER_APP_ROLLBACK_ENABLE") is True and not config.get("SECURE_BOOT")
-        and not config.get("BOOTLOADER_APP_ANTI_ROLLBACK"), "wrong bootstrap security settings")
+    validate_update_security(build, description, config, public_key)
     ssid, password = config.get("P1S_WIFI_SSID", ""), config.get("P1S_WIFI_PASSWORD", "")
     require(isinstance(ssid, str) and 1 <= len(ssid.encode("utf-8")) <= 32 and isinstance(password, str)
         and (len(password.encode("utf-8")) == 0 or 8 <= len(password.encode("utf-8")) <= 63),
@@ -137,14 +163,14 @@ def verify_package(package_dir, public_key, version, build_dir=None):
     require(manifest == expected, "manifest does not describe the signed image")
     if build_dir is not None:
         build = Path(build_dir)
-        validate_generic_build(build, version)
+        validate_generic_build(build, version, public_key)
         validate_build_image(build, directory / IMAGE_NAME)
     return manifest
 
 def package_firmware(build_dir, public_key, output_dir, version):
     build, output = Path(build_dir), Path(output_dir)
     stable_version(version)
-    validate_generic_build(build, version)
+    validate_generic_build(build, version, public_key)
     validate_build_image(build)
     manifest = image_metadata(build / IMAGE_NAME, public_key, version)
     require(output.resolve() != build.resolve(), "package directory must be separate from build output")

@@ -36,7 +36,7 @@ int main(void)
     assert(service_operation_begin(SERVICE_OPERATION_WIFI));
     assert(run(&f)==ESP_ERR_NOT_ALLOWED && f.active && f.calls==0);
     service_operation_end(SERVICE_OPERATION_WIFI);
-    for(service_operation_t owner=SERVICE_OPERATION_PRINTER_CONFIG;owner<=SERVICE_OPERATION_PRINTER_CYCLE;++owner){
+    for(service_operation_t owner=SERVICE_OPERATION_PRINTER_CONFIG;owner<=SERVICE_OPERATION_PRINTER_CONFIG;++owner){
         assert(service_operation_begin(owner));
         assert(run(&f)==ESP_ERR_NOT_ALLOWED && f.active && f.calls==0);
         service_operation_end(owner);

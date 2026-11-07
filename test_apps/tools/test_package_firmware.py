@@ -27,6 +27,10 @@ class PackageFirmwareTests(unittest.TestCase):
         cls.public = Path(cls.keys.name) / "fixture_public.bin"
         secure("generate-signing-key", "--version", "1", cls.private)
         secure("extract-public-key", "--keyfile", cls.private, cls.public)
+        other_private = Path(cls.keys.name) / "other_private.pem"
+        cls.other_public = Path(cls.keys.name) / "other_public.bin"
+        secure("generate-signing-key", "--version", "1", other_private)
+        secure("extract-public-key", "--keyfile", other_private, cls.other_public)
 
     @classmethod
     def tearDownClass(cls):
@@ -43,12 +47,15 @@ class PackageFirmwareTests(unittest.TestCase):
         self.config = {"IDF_TARGET": "esp32", "ESPTOOLPY_FLASHSIZE": "4MB",
             "BOOTLOADER_APP_ROLLBACK_ENABLE": True, "SECURE_SIGNED_APPS_NO_SECURE_BOOT": True,
             "SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT": True, "SECURE_BOOT": False,
+            "SECURE_SIGNED_APPS_ECDSA_SCHEME": True,
+            "SECURE_BOOT_VERIFICATION_KEY": str(self.public),
             "P1S_WIFI_SSID": "", "P1S_WIFI_PASSWORD": "", "P1S_RELAY_ACTIVE_LOW": False,
             "P1S_RELEASE_REPOSITORY": "ahmaddawod12/P1S-HeatControl"}
         self.write_config()
         (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=OFF\n")
         (self.build / "project_description.json").write_text(json.dumps({"project_name": "p1s_heat_controller",
-            "project_version": "1.0.0", "target": "esp32", "app_bin": "p1s_heat_controller.bin"}))
+            "project_version": "1.0.0", "target": "esp32", "app_bin": "p1s_heat_controller.bin",
+            "project_path": self.temp.name}))
         table = b"".join(struct.pack("<HBBII16sI", 0x50AA, kind, sub, offset, size, name.encode(), 0)
             for name, kind, sub, offset, size in PARTITIONS)
         (self.build / "partition_table/partition-table.bin").write_bytes(table + b"\xff" * 32)
@@ -60,6 +67,7 @@ class PackageFirmwareTests(unittest.TestCase):
         data[112:144] = b"v6.1".ljust(32, b"\0")
         data[256:372] = struct.pack("<II24s24s24s32sI", 0x31533150, 2,
             b"p1s-heat-controller", b"esp32-wroom-32", b"p1s-4m-ota-v1", b"1.0.0", 0)
+        data[500:564] = self.public.read_bytes()
         firmware = image.ESP32FirmwareImage()
         firmware.entrypoint = 0x40080000
         firmware.flash_size_freq = 0x20
@@ -103,6 +111,57 @@ class PackageFirmwareTests(unittest.TestCase):
     def write_config(self):
         (self.build / "config/sdkconfig.json").write_text(json.dumps(self.config))
 
+    def prepare_bootstrap(self):
+        self.config.update(P1S_WIFI_SSID="fixture-network", P1S_WIFI_PASSWORD="fixture-password")
+        self.write_config()
+        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
+        self.sign_image(personal=True)
+
+    def assert_security_rejected(self, reason):
+        self.write_config()
+        for profile in ("generic", "bootstrap"):
+            with self.subTest(profile=profile):
+                if profile == "generic":
+                    with self.assertRaisesRegex(ValueError, reason):
+                        package_firmware(self.build, self.public, self.output, "1.0.0")
+                else:
+                    self.prepare_bootstrap()
+                    with self.assertRaisesRegex(ValueError, reason):
+                        validate_bootstrap(self.build, self.public, "1.0.0")
+
+    def test_rejects_flash_encryption_before_packaging_or_bootstrap(self):
+        self.config["SECURE_FLASH_ENC_ENABLED"] = True
+        self.assert_security_rejected("flash encryption")
+
+    def test_rejects_mismatched_future_update_key(self):
+        self.config["SECURE_BOOT_VERIFICATION_KEY"] = str(self.other_public)
+        self.data[500:564] = self.other_public.read_bytes()
+        self.sign_image()
+        self.assert_security_rejected("verification key")
+
+    def test_rejects_missing_future_update_key(self):
+        del self.config["SECURE_BOOT_VERIFICATION_KEY"]
+        self.assert_security_rejected("verification key")
+
+    def test_rejects_incompatible_signature_scheme(self):
+        self.config["SECURE_SIGNED_APPS_ECDSA_SCHEME"] = False
+        self.assert_security_rejected("ECDSA")
+
+    def test_rejects_stale_application_embedding_another_key(self):
+        self.data[500:564] = self.other_public.read_bytes()
+        self.sign_image()
+        self.assert_security_rejected("embedded verification key")
+
+    def test_resolves_relative_verification_key_from_project_directory(self):
+        key_path = Path(self.temp.name) / "keys" / "update.bin"
+        key_path.parent.mkdir()
+        key_path.write_bytes(self.public.read_bytes())
+        self.config["SECURE_BOOT_VERIFICATION_KEY"] = "keys/update.bin"
+        self.write_config()
+        self.assertEqual(package_firmware(self.build, self.public, self.output, "1.0.0")["version"], "1.0.0")
+        self.prepare_bootstrap()
+        self.assertEqual(validate_bootstrap(self.build, self.public, "1.0.0")["version"], "1.0.0")
+
     def test_signed_asset_manifest_matches_bytes(self):
         import hashlib
         manifest = package_firmware(self.build, self.public, self.output, "1.0.0")
@@ -125,7 +184,7 @@ class PackageFirmwareTests(unittest.TestCase):
         public = Path(self.temp.name) / "untrusted.bin"
         secure("generate-signing-key", "--version", "1", private)
         secure("extract-public-key", "--keyfile", private, public)
-        with self.assertRaisesRegex(ValueError, "signature"):
+        with self.assertRaisesRegex(ValueError, "signature|verification key"):
             package_firmware(self.build, public, self.output, "1.0.0")
         signed = self.build / NAME
         original = signed.read_bytes()

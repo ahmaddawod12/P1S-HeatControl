@@ -26,8 +26,8 @@ typedef struct {
     void (*get_printer_status)(printer_control_status_t *out);
     esp_err_t (*request_printer_config)(const printer_config_request_t *request);
     esp_err_t (*forget_printer_config)(void);
-    esp_err_t (*arm_printer_cycle)(const printer_arm_request_t *request);
-    esp_err_t (*stop_printer_cycle)(void);
+    esp_err_t (*start_printer_monitor)(void);
+    esp_err_t (*stop_printer_monitor)(void);
 } web_server_ops_t;
 
 typedef struct {

@@ -112,8 +112,6 @@ static esp_err_t send_command_result(httpd_req_t *req, esp_err_t result)
         return send_error(req, "400 Bad Request", "invalid_argument",
                           "the request was rejected by validation");
     case ESP_ERR_NOT_ALLOWED:
-        if(service_operation_current()==SERVICE_OPERATION_PRINTER_CYCLE)
-            return send_error(req,"409 Conflict","automatic_control","printer chamber control owns heating");
         return send_error(req, "409 Conflict", "maintenance", "firmware maintenance is active");
     case ESP_ERR_INVALID_STATE:
     case ESP_ERR_TIMEOUT:
@@ -237,9 +235,7 @@ static esp_err_t enable_handler(httpd_req_t *req)
 static esp_err_t disable_handler(httpd_req_t *req)
 {
     if (!chamber_request_trusted(req, false)) return ESP_FAIL;
-    const esp_err_t result=s_ops.set_enabled(false);
-    if(s_ops.stop_printer_cycle)(void)s_ops.stop_printer_cycle();
-    return send_command_result(req,result);
+    return send_command_result(req, s_ops.set_enabled(false));
 }
 
 static esp_err_t manual_fan_enable_handler(httpd_req_t *req)
@@ -415,8 +411,8 @@ web_server_config_t web_server_default_config(void)
             .get_printer_status = printer_control_get_status,
             .request_printer_config = printer_control_request_config,
             .forget_printer_config = printer_control_forget_config,
-            .arm_printer_cycle = printer_control_arm,
-            .stop_printer_cycle = printer_control_stop,
+            .start_printer_monitor = printer_control_monitor_start,
+            .stop_printer_monitor = printer_control_monitor_stop,
         },
         .port = DEFAULT_PORT,
     };
@@ -435,6 +431,8 @@ esp_err_t web_server_start(const web_server_config_t *config)
     }
 
     s_ops = config->ops;
+    esp_err_t err = sse_hub_init();
+    if (err != ESP_OK) return err;
 
     httpd_config_t httpd_config = HTTPD_DEFAULT_CONFIG();
     httpd_config.server_port = config->port;
@@ -442,7 +440,7 @@ esp_err_t web_server_start(const web_server_config_t *config)
     httpd_config.max_uri_handlers = 28;
     httpd_config.lru_purge_enable = true;
 
-    esp_err_t err = httpd_start(&s_server, &httpd_config);
+    err = httpd_start(&s_server, &httpd_config);
     if (err != ESP_OK) {
         s_server = NULL;
         return err;

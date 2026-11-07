@@ -9,4 +9,6 @@ esp_transport_handle_t printer_deadline_transport_create(esp_transport_handle_t,
 void printer_deadline_transport_set(esp_transport_handle_t, uint64_t);
 void printer_deadline_transport_cleanup(esp_transport_handle_t,
                                         void (*)(void *), void *);
-bool printer_socket_nonblocking(int fd);
+/* Save/restore every socket flag; bounded writes alone require O_NONBLOCK. */
+bool printer_socket_nonblocking_begin(int fd, int *saved_flags);
+bool printer_socket_restore(int fd, int saved_flags);

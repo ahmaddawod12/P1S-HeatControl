@@ -181,40 +181,12 @@ static bool ipv4_valid(const char *s) {
   }
   return false;
 }
-static bool time_host_valid(const char *s) {
-  bool numeric = true;
-  for (const char *p = s; *p; p++)
-    if ((*p < '0' || *p > '9') && *p != '.')
-      numeric = false;
-  if (numeric)
-    return ipv4_valid(s);
-  unsigned n = 0;
-  char previous = 0;
-  for (; *s; s++) {
-    if (*s == '.') {
-      if (!n || previous == '-')
-        return false;
-      n = 0;
-    } else {
-      if (!ascii_alnum(*s) && *s != '-')
-        return false;
-      if (!n && *s == '-')
-        return false;
-      if (++n > 63)
-        return false;
-    }
-    previous = *s;
-  }
-  return n && previous != '-';
-}
 bool printer_config_valid(const printer_connection_config_t *p) {
   if (!p || !text_fits(p->ipv4, sizeof(p->ipv4)) ||
       !text_fits(p->serial, sizeof(p->serial)) ||
-      !text_fits(p->access_code, sizeof(p->access_code)) ||
-      !text_fits(p->ntp_host, sizeof(p->ntp_host)))
+      !text_fits(p->access_code, sizeof(p->access_code)))
     return false;
-  if (!ipv4_valid(p->ipv4) || !p->serial[0] || !p->access_code[0] ||
-      !time_host_valid(p->ntp_host))
+  if (!ipv4_valid(p->ipv4) || !p->serial[0] || !p->access_code[0])
     return false;
   for (const char *s = p->serial; *s; s++)
     if (!ascii_alnum(*s))
@@ -234,7 +206,7 @@ esp_err_t device_config_load_printer(printer_connection_config_t *out) {
   memcpy(p.ipv4, bytes + 8, 16);
   memcpy(p.serial, bytes + 24, 33);
   memcpy(p.access_code, bytes + 57, 65);
-  memcpy(p.ntp_host, bytes + 122, 254);
+  /* Bytes 122..375 held a time server in earlier firmware; ignored now. */
   if (!printer_config_valid(&p))
     return ESP_ERR_INVALID_RESPONSE;
   *out = p;
@@ -253,7 +225,6 @@ esp_err_t device_config_save_printer(const printer_connection_config_t *p) {
   memcpy(bytes + 8, p->ipv4, strlen(p->ipv4));
   memcpy(bytes + 24, p->serial, strlen(p->serial));
   memcpy(bytes + 57, p->access_code, strlen(p->access_code));
-  memcpy(bytes + 122, p->ntp_host, strlen(p->ntp_host));
   return write_record("printer_v1", bytes, sizeof(bytes));
 }
 esp_err_t device_config_clear_printer(void) {

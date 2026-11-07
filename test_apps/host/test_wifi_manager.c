@@ -136,11 +136,39 @@ static void failed_disconnect_does_not_mask_router_failure(void)
     run_worker_at(0);
     assert_retry_after_disconnect(500, 1);
 }
+static void lease_loss_opens_fallback_and_reacquires(void)
+{
+    reset_fixture(true);
+    run_worker_at(0);
+    associated();
+    ip_event_got_ip_t acquired = {.ip_info.ip.addr = 0x1600000a};
+    got_ip_event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, &acquired);
+    run_worker_at(1000);
+    assert(s_engine.status.connected && !s_engine.status.ap_active);
+    /* Keep the station associated: only its DHCP lease has disappeared.
+     * The event ID must be handled before interpreting a GOT_IP payload. */
+    got_ip_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, &acquired);
+    run_worker_at(1500);
+    assert(!s_engine.status.connected);
+    assert(!strcmp(s_engine.status.ip_addr, "0.0.0.0"));
+    assert(atomic_load(&s_disconnect_epoch) == 1);
+    run_worker_at(31499);
+    assert(!s_engine.status.ap_active);
+    run_worker_at(31500);
+    assert(s_engine.status.ap_active);
+    acquired.ip_info.ip.addr = 0x1700000a;
+    got_ip_event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, &acquired);
+    run_worker_at(32000);
+    assert(s_engine.status.connected && s_engine.status.ap_active);
+    assert(!strcmp(s_engine.status.ip_addr, "10.0.0.23"));
+    run_worker_at(42000);
+    assert(!s_engine.status.ap_active);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     reset_fixture(true);
-    for(service_operation_t owner=SERVICE_OPERATION_PRINTER_CONFIG;owner<=SERVICE_OPERATION_PRINTER_CYCLE;++owner){
+    for(service_operation_t owner=SERVICE_OPERATION_PRINTER_CONFIG;owner<=SERVICE_OPERATION_PRINTER_CONFIG;++owner){
         assert(service_operation_begin(owner));
         wifi_manager_status_t status;wifi_manager_get_status(&status);
         assert(!status.can_save && wifi_manager_request_credentials(&k_next)==ESP_ERR_NOT_ALLOWED);
@@ -150,6 +178,7 @@ int main(int argc, char **argv)
     else if (strcmp(argv[1], "association") == 0) association_clears_an_unreported_local_disconnect();
     else if (strcmp(argv[1], "replacement") == 0) credential_change_consumes_only_its_own_disconnect();
     else if (strcmp(argv[1], "failed_disconnect") == 0) failed_disconnect_does_not_mask_router_failure();
+    else if (strcmp(argv[1], "ip_lost") == 0) lease_loss_opens_fallback_and_reacquires();
     else assert(!"unknown Wi-Fi recovery scenario");
     puts("Native Wi-Fi disconnect recovery passed");
     return 0;

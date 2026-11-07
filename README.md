@@ -13,8 +13,9 @@ control the heater and fan relays.
 The local dashboard includes signed firmware updates from this public GitHub
 repository and optional verified local MQTT monitoring for a
 Bambu P1S. There is no application password. Everything the browser loads is
-served from the device. Automatic preheat/Resume is implemented behind a
-default-off qualification gate; the owner's printer workflow is still untested.
+served from the device. **Monitor P1S** turns manual heating off by itself
+when the print ends; it only reads the printer state and never sends print
+commands. Live monitoring trials are still pending.
 
 > **Mains warning.** The heater channel switches 220 VAC. Commission the board
 > with both relay contacts unloaded and work through
@@ -135,35 +136,50 @@ software.
 
 Regulation keeps running through a Wi-Fi outage.
 
-### Optional P1S monitoring and preheat/Resume
+### Optional Monitor P1S
 
-Open **Printer connection** on the dashboard and save the printer IPv4, serial,
-LAN access code and reachable time server. The access code is write only; omit
-it to preserve the saved code only for the same serial. Monitoring uses verified
-TLS on the local network. An unavailable printer does not block manual chamber
-control or dashboard startup.
+Open **Printer connection** on the dashboard and save the printer IPv4, serial
+and LAN access code. The access code is write only; omit it to preserve the
+saved code only for the same serial. The ESP32 connects to the printer's local
+MQTT over TLS and verifies the printer certificate against the Bambu CA and the
+serial. The printer stays in its normal cloud mode: no LAN-only mode, Developer
+Mode or time server is needed, and Bambu Handy and cloud printing keep working.
+An unavailable printer does not block manual chamber control or dashboard
+startup.
 
-The intended automated workflow is: the PC prepares and submits the complete
-job with a qualified initial pause before all extrusion; the operator confirms
-that pause and selects **Preheat & Resume**; the ESP32 reaches the existing
-target, settles within ±1 °C for 30 seconds, and permits one Resume attempt.
-It maintains chamber control until actual printer finish. It never selects a
-file or carries print options. A file merely open on the PC is not a resumable
-job.
+For a first connection, follow the [Wi-Fi change and printer monitoring test](docs/printer-connection-test.md)
+with relay loads disconnected before attempting any heated integration.
 
-**Automatic Resume is currently unavailable in generic builds.** P1S firmware,
-Bambu Studio version, exact pause command/placement and live timing/resources
-still require qualification. `CONFIG_P1S_PRINTER_AUTO_RESUME` defaults to `n`.
-See [qualification](docs/printer-integration-qualification.md) and the
-[PC startup profile procedure](docs/printer-startup-profile.md).
+The heating controls are **Enable heating**, **Monitor P1S**, **Disable** and
+**Run fan manually**. Monitor P1S is available while heating is enabled and the
+printer state is known, and turns the heater off by itself when the print ends:
 
-Active automation captures the target and uses a revocable heat lease, renewed
-every second for at most five seconds. The independent 100 ms runtime enforces
-expiry. Connection/status loss, a thermal fault, later printer pause, changed
-job, cancellation or uncertain Resume ends chamber control. Reconnect and
-reboot do not restore a cycle. **Stop chamber control** and **Disable** revoke
-automation without cancelling the printer job; manual-fan control remains
-independent. Wi-Fi changes and OTA cannot overlap an active cycle.
+| Printer state when Monitor P1S is pressed | What happens |
+|---|---|
+| FINISH, FAILED or IDLE (left over from the last print) | Heating continues and waits for the next print to start |
+| PREPARE or RUNNING | Heating continues and watches this print |
+| PAUSE | Heater held off until the print runs again |
+
+| While monitoring | Heater | Monitoring |
+|---|---|---|
+| The watched print ends in FINISH or FAILED, or drops to IDLE | Off | Ends; heating disabled |
+| RUNNING or PREPARE → PAUSE | Held off | Continues |
+| PAUSE → RUNNING | Back on | Continues |
+| Connection lost, or no report for 5 minutes while printing | Held off | Continues; heating returns with the connection |
+| No print starts within 60 minutes of pressing | Off | Ends; heating disabled |
+
+Pressing **Monitor P1S** again stops monitoring and keeps heating. **Disable**,
+a fault, maintenance or a firmware update turn heating off and end monitoring;
+saving or forgetting printer settings while monitoring ends it and turns
+heating off. Monitoring is never restored after a reboot. While monitoring,
+the heater may only run while the monitor keeps renewing a 5-second permit, so
+a stalled monitor holds the heater off.
+
+The ESP32 reads only `gcode_state`. The only message it sends to the printer is
+the `pushall` status request: once when it connects and, while the state is
+unknown, at most once every 5 minutes. Report bursts or unreadable reports
+never force a reconnect; `GET /api/printer` exposes a `reconnects` count for
+diagnosis.
 
 ## Network
 
@@ -214,11 +230,11 @@ enable heating or clear a fault.
 | POST | `/api/firmware/update` | Start one update, with `{}`, matching Origin and `X-P1S-CSRF` |
 | GET | `/api/wifi` | Visible saved credentials, connection/hotspot status and CSRF token; no-store |
 | PUT | `/api/wifi` | Save `{"ssid":"network","password":"password"}` with matching Origin and `X-P1S-CSRF`; returns 202 |
-| GET | `/api/printer` | Redacted connection/readiness, printer/job/progress, cycle/outcome, offered arm token and CSRF token; no-store |
+| GET | `/api/printer` | Redacted connection settings, printer state, reconnect count, monitoring status and CSRF token; no-store |
 | PUT | `/api/printer/config` | Admit printer settings save; 202; preserve an omitted access code only for the same serial |
 | DELETE | `/api/printer/config` | Forget only the printer record; 204 after storage confirms the clear |
-| POST | `/api/printer/cycle` | Admit `{"arm_token":"…","initial_pause_confirmed":true}` using the existing chamber target; 202 |
-| POST | `/api/printer/cycle/stop` | Revoke chamber automation; 204; does not cancel the printer job |
+| POST | `/api/printer/monitor` | Start Monitor P1S with `{}`; 204, or 409 with the reason when it is not available |
+| POST | `/api/printer/monitor/stop` | Stop monitoring and keep heating; 204 |
 | GET | `/`, `/styles.css`, `/app.js`, `/wifi.js`, `/printer.js` | Dashboard |
 
 All chamber mutations (`/api/target`, `/api/calibration`, `/api/control/*`, and `/api/fault/acknowledge`)
@@ -262,8 +278,8 @@ Origin/`X-P1S-CSRF` protection, with 400 for invalid input, 403 for an untrusted
 request, 409 for a conflicting/ineligible request, and 503 for unavailability.
 Printer inputs are limited to 1,024 bytes and status to 2,048 bytes. The existing
 512-byte status/SSE contract is unchanged. The printer settings fields are
-`enabled`, `ipv4`, `serial`, optional `access_code`, and optional `ntp_host`
-(default `pool.ntp.org`). Unknown/duplicate fields and trailing JSON are rejected.
+`enabled`, `ipv4`, `serial` and optional `access_code`. Unknown/duplicate
+fields (including the retired `ntp_host`) and trailing JSON are rejected.
 
 State names on the wire: `boot`, `idle`, `heating`, `holding`, `fault`. Fault names: `none`, `sensor_open`, `sensor_short`, `sensor_range`,
 `sensor_invalid`, `sensor_stale`, `overtemperature`, `nvs`, `output_init`.
@@ -384,7 +400,7 @@ python -m unittest discover -s test_apps/tools -v
 ```
 
 After building `build-release`, run `python tools/check_printer_stack.py --build build-release`
-to check the compiled HTTP arm path against its stack budget.
+to check the compiled HTTP Monitor P1S paths against their stack budget.
 Actual source verification results and pending physical checks are recorded in
 [printer qualification](docs/printer-integration-qualification.md).
 
@@ -398,8 +414,8 @@ Actual source verification results and pending physical checks are recorded in
 4. `app_runtime_start`
 5. `wifi_manager_start` — dedicated device configuration and saved Wi-Fi
 6. `web_server_start`, then the update worker
-7. Optional printer coordinator — saved connection settings restore monitoring
-   only; an active cycle, heater ownership and Resume intent never restore
+7. Optional printer coordinator — saved connection settings restore the printer
+   connection only; Monitor P1S and heating never restore after a reboot
 
 A relay or runtime failure stops startup with the outputs off. A networking or
 web-server failure leaves the runtime regulating and retries in the background.
@@ -417,10 +433,10 @@ web-server failure leaves the runtime regulating and retries in the background.
 | `components/device_config/` | Dedicated Wi-Fi, update-attempt and optional printer NVS records |
 | `components/firmware_update/` | Signed OTA transport, worker and boot confirmation |
 | `components/board/` | Independent relay output safety and ordering |
-| `components/runtime/` | Tasks, queues, independent automatic heat leases, and the only relay handle |
-| `components/clock_service/` | Shared cancellable time synchronization for verified TLS |
-| `components/printer_link/` | Bounded reports, run identity and verified local MQTT transport |
-| `components/printer_control/` | Explicit per-run preheat/Resume policy and coordinating worker |
+| `components/runtime/` | Tasks, queues, the fail-safe printer-monitoring heat permit, and the only relay handle |
+| `components/clock_service/` | Cancellable time synchronization before the GitHub firmware-update check |
+| `components/printer_link/` | `gcode_state`-only reports, rate-limited `pushall` and verified local MQTT transport |
+| `components/printer_control/` | Monitor P1S state machine and coordinating worker |
 | `components/diagnostics/` | 32-entry transition ring buffer |
 | `components/wifi_manager/` | Saved credentials, fallback hotspot, async changes, reconnect, mDNS |
 | `components/web_server/` | JSON contract, REST routes, SSE hub |

@@ -16,7 +16,6 @@
 #include "freertos/task.h"
 #include "heat_controller.h"
 #include "runtime_output_policy.h"
-#include "runtime_auto_lease.h"
 #include "settings.h"
 #include "temperature_monitor.h"
 
@@ -46,9 +45,10 @@ static bool s_boot_maintenance;
 static atomic_bool s_maintenance_safe;
 static atomic_bool s_urgent_disable;
 static atomic_uint s_enable_epoch;
-static runtime_auto_lease_t s_auto;
-static bool s_auto_enable_pending;
 static unsigned s_pending_commands;
+/* Written under s_admission_lock; the flag is also read lock-free. */
+static atomic_bool s_monitor_active;
+static uint64_t s_monitor_permit_until;
 /* Guarded by s_admission_lock. Reserves one queue slot during persistence. */
 static bool s_settings_save_pending;
 static TaskHandle_t s_temperature_task;
@@ -236,25 +236,14 @@ static void controller_task(void *arg)
                                            timestamp_ms);
         }
 
-        const bool auto_was_active = s_auto.status.active;
-        (void) runtime_auto_lease_step(&s_auto, timestamp_ms);
         const bool urgent_disable = atomic_exchange(&s_urgent_disable, false);
-        if (urgent_disable || maintenance) {
-            runtime_auto_lease_revoke(&s_auto, 0, maintenance ? RUNTIME_AUTO_MAINTENANCE : RUNTIME_AUTO_OPERATOR_STOP);
-        }
-        if (urgent_disable || (auto_was_active && !s_auto.status.active) ||
-            (!s_auto.status.active && !s_auto.status.teardown_applied)) {
+        if (urgent_disable) {
             const heat_controller_command_t disable = {.kind = HEAT_COMMAND_DISABLE};
             (void) heat_controller_command(&s_controller, &disable, sample_arg, timestamp_ms);
-            s_auto_enable_pending = false;
         }
-        const bool auto_command_allowed = !have_command || !s_auto.status.active ||
-            command.kind == RUNTIME_COMMAND_MANUAL_FAN ||
-            (command.kind == RUNTIME_COMMAND_HEAT &&
-             (command.heat.kind == HEAT_COMMAND_DISABLE || command.heat.kind == HEAT_COMMAND_LATCH_EXTERNAL_FAULT));
         const bool current_enable = command.kind != RUNTIME_COMMAND_HEAT ||
             command.heat.kind != HEAT_COMMAND_ENABLE || command.enable_epoch == atomic_load(&s_enable_epoch);
-        const bool allowed_command = have_command && current_enable && auto_command_allowed &&
+        const bool allowed_command = have_command && current_enable &&
             (!ack_request || timestamp_ms < command.ack_deadline_ms) && (!maintenance ||
             command.kind == RUNTIME_COMMAND_CALIBRATION ||
             (command.kind == RUNTIME_COMMAND_HEAT &&
@@ -271,25 +260,26 @@ static void controller_task(void *arg)
                 if (ack_request) acknowledged = applied;
             }
         }
-        if (s_auto.status.active && s_auto_enable_pending && !urgent_disable && !maintenance) {
-            const heat_controller_command_t enable = {.kind = HEAT_COMMAND_ENABLE};
-            if (!heat_controller_command(&s_controller, &enable, sample_arg, timestamp_ms)) {
-                runtime_auto_lease_revoke(&s_auto, 0, RUNTIME_AUTO_FAULT);
-            }
-            s_auto_enable_pending = false;
-        }
         if (maintenance) {
             const heat_controller_command_t disable = {.kind = HEAT_COMMAND_DISABLE};
             (void) heat_controller_command(&s_controller, &disable, sample_arg, timestamp_ms);
             manual_fan_on = false;
         }
+        /* Disabled heating (any path) ends monitoring; a stale permit holds
+         * the element off while heating stays enabled. */
+        if (atomic_load(&s_monitor_active) && !heat_controller_snapshot(&s_controller).enabled) {
+            atomic_store(&s_monitor_active, false);
+        }
+        heat_controller_set_inhibit(&s_controller,
+                                    atomic_load(&s_monitor_active) &&
+                                        timestamp_ms >= s_monitor_permit_until,
+                                    timestamp_ms);
         if (have_sample) {
             heat_controller_step(&s_controller, &sample, timestamp_ms);
         }
 
         const heat_controller_snapshot_t snapshot =
             heat_controller_snapshot(&s_controller);
-        if (snapshot.state == HEAT_STATE_FAULT) runtime_auto_lease_revoke(&s_auto, 0, RUNTIME_AUTO_FAULT);
         const runtime_output_request_t output_request =
             runtime_output_policy_step(&output_policy, &snapshot, heater_on,
                                        manual_fan_on, timestamp_ms);
@@ -327,7 +317,6 @@ static void controller_task(void *arg)
             };
             xQueueOverwrite(s_ack_queue, &reply);
         }
-        if (!s_auto.status.active && !snapshot.enabled && !heater_on && outputs_known) s_auto.status.teardown_applied = true;
         atomic_store(&s_maintenance_safe, maintenance && outputs_known && !heater_on && !fan_on &&
                      s_pending_commands == 0);
         xSemaphoreGive(s_admission_lock);
@@ -344,9 +333,7 @@ static esp_err_t send_command(const runtime_command_t *command)
         return ESP_ERR_INVALID_STATE;
     }
     if (xSemaphoreTake(s_admission_lock, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
-    const bool owned = s_auto.status.active && command->kind == RUNTIME_COMMAND_HEAT &&
-        (command->heat.kind == HEAT_COMMAND_ENABLE || command->heat.kind == HEAT_COMMAND_SET_TARGET);
-    const bool blocked = owned || (atomic_load(&s_maintenance) &&
+    const bool blocked = (atomic_load(&s_maintenance) &&
         ((command->kind == RUNTIME_COMMAND_MANUAL_FAN && command->manual_fan_on) ||
          (command->kind == RUNTIME_COMMAND_HEAT &&
           (command->heat.kind == HEAT_COMMAND_ENABLE || command->heat.kind == HEAT_COMMAND_SET_TARGET ||
@@ -414,8 +401,8 @@ esp_err_t app_runtime_start_with_ops(const app_runtime_ops_t *ops)
     /* Initialize the static diagnostics mutex before HTTP and controller tasks
      * can access the ring concurrently. A restarted runtime starts new history. */
     diagnostics_reset();
-    runtime_auto_lease_init(&s_auto);
-    s_auto_enable_pending = false;
+    atomic_store(&s_monitor_active, false);
+    s_monitor_permit_until = 0;
     s_pending_commands = 0;
     s_settings_save_pending = false;
     atomic_store(&s_urgent_disable, false);
@@ -576,7 +563,7 @@ static esp_err_t set_setting(float value, bool target)
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t err = ESP_OK;
-    if (atomic_load(&s_maintenance) || s_auto.status.active) err = ESP_ERR_NOT_ALLOWED;
+    if (atomic_load(&s_maintenance)) err = ESP_ERR_NOT_ALLOWED;
     else if (uxQueueSpacesAvailable(s_command_queue) == 0) err = ESP_ERR_TIMEOUT;
     if (err == ESP_OK) {
         s_settings_save_pending = true;
@@ -712,44 +699,45 @@ void app_runtime_get_status(app_status_t *out_status)
     xSemaphoreGive(s_status_lock);
 }
 
-esp_err_t app_runtime_auto_acquire(uint64_t id,float target,uint64_t until)
+esp_err_t app_runtime_monitor_begin(uint64_t permit_until_ms)
 {
     if (!s_running || !s_admission_lock) return ESP_ERR_INVALID_STATE;
-    if (xSemaphoreTake(s_admission_lock,pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
-    app_status_t status; app_runtime_get_status(&status);
-    const uint64_t now=now_ms();
-    esp_err_t err=ESP_ERR_NOT_ALLOWED;
-    if (!atomic_load(&s_maintenance) && !atomic_load(&s_urgent_disable) && !s_pending_commands &&
-        !status.enabled && status.fault==HEAT_FAULT_NONE && status.temperature.valid &&
-        status.temperature.consecutive_valid>=3 && now>=status.temperature.timestamp_ms &&
-        now-status.temperature.timestamp_ms<=TEMPERATURE_SAMPLE_MAX_AGE_MS &&
-        target>0 && heat_target_is_valid(target) && target==status.target_c &&
-        status.temperature.raw_c<82 && status.temperature.filtered_c<82 && s_auto.status.teardown_applied) {
-        err=runtime_auto_lease_acquire(&s_auto,id,now,until);
-        if (err==ESP_OK) s_auto_enable_pending=true;
+    if (xSemaphoreTake(s_admission_lock, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    const heat_controller_snapshot_t heat = heat_controller_snapshot(&s_controller);
+    esp_err_t err = ESP_OK;
+    if (permit_until_ms > now_ms() + APP_RUNTIME_MONITOR_PERMIT_MAX_MS) {
+        err = ESP_ERR_INVALID_ARG;
+    } else if (atomic_load(&s_maintenance) || atomic_load(&s_urgent_disable) ||
+               atomic_load(&s_monitor_active) || !heat.enabled ||
+               heat.state == HEAT_STATE_FAULT) {
+        err = ESP_ERR_NOT_ALLOWED;
+    } else {
+        s_monitor_permit_until = permit_until_ms;
+        atomic_store(&s_monitor_active, true);
     }
-    xSemaphoreGive(s_admission_lock); return err;
+    xSemaphoreGive(s_admission_lock);
+    return err;
 }
-esp_err_t app_runtime_auto_renew(uint64_t id,uint64_t until)
+esp_err_t app_runtime_monitor_permit(uint64_t permit_until_ms)
 {
     if (!s_running || !s_admission_lock) return ESP_ERR_INVALID_STATE;
-    if (xSemaphoreTake(s_admission_lock,pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
-    esp_err_t err=runtime_auto_lease_renew(&s_auto,id,now_ms(),until);
-    xSemaphoreGive(s_admission_lock); return err;
+    if (xSemaphoreTake(s_admission_lock, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_OK;
+    if (!atomic_load(&s_monitor_active)) err = ESP_ERR_INVALID_STATE;
+    else if (permit_until_ms > now_ms() + APP_RUNTIME_MONITOR_PERMIT_MAX_MS) err = ESP_ERR_INVALID_ARG;
+    else s_monitor_permit_until = permit_until_ms;
+    xSemaphoreGive(s_admission_lock);
+    return err;
 }
-void app_runtime_auto_revoke(uint64_t id)
+void app_runtime_monitor_end(bool disable_heating)
 {
-    if (!id) { atomic_fetch_add(&s_enable_epoch,1); atomic_store(&s_urgent_disable,true); return; }
+    if (disable_heating) (void) app_runtime_set_enabled(false);
     if (!s_running || !s_admission_lock) return;
-    if (xSemaphoreTake(s_admission_lock,pdMS_TO_TICKS(100)) != pdTRUE) return;
-    runtime_auto_lease_revoke(&s_auto,id,RUNTIME_AUTO_OPERATOR_STOP);
+    xSemaphoreTake(s_admission_lock, portMAX_DELAY);
+    atomic_store(&s_monitor_active, false);
     xSemaphoreGive(s_admission_lock);
 }
-void app_runtime_get_auto_status(runtime_auto_status_t *out)
+bool app_runtime_monitor_active(void)
 {
-    if (!out) return;
-    *out=(runtime_auto_status_t){0};
-    if (!s_running || !s_admission_lock) return;
-    if (xSemaphoreTake(s_admission_lock,pdMS_TO_TICKS(100)) != pdTRUE) return;
-    *out=s_auto.status;xSemaphoreGive(s_admission_lock);
+    return s_running && atomic_load(&s_monitor_active);
 }

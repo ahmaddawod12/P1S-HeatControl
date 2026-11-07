@@ -22,8 +22,9 @@ TEST_CASE("dashboard asset contains required controls", "[web]")
     TEST_ASSERT_NOT_NULL(strstr(index_html_start, "id=\"enable-button\""));
     TEST_ASSERT_NOT_NULL(strstr(index_html_start, "id=\"fan-toggle-button\""));
     TEST_ASSERT_NOT_NULL(strstr(index_html_start, "id=\"fault-panel\""));
-    TEST_ASSERT_NOT_NULL(strstr(index_html_start,"id=\"printer-preheat\""));
-    TEST_ASSERT_NOT_NULL(strstr(index_html_start,"id=\"printer-confirm\""));
+    TEST_ASSERT_NOT_NULL(strstr(index_html_start,"id=\"monitor-button\""));
+    TEST_ASSERT_NULL(strstr(index_html_start,"id=\"printer-preheat\""));
+    TEST_ASSERT_NOT_NULL(strstr(index_html_start,"id=\"monitor-status\""));
 }
 TEST_CASE("printer script is self-hosted without embedded NUL", "[web]") {
     TEST_ASSERT_NOT_NULL(strstr(printer_js_start,"/api/printer"));

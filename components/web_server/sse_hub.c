@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "sse";
 
@@ -24,13 +25,14 @@ typedef struct {
 
 static sse_client_t s_clients[SSE_HUB_MAX_CLIENTS];
 static SemaphoreHandle_t s_lock;
+static StaticSemaphore_t s_lock_storage;
 
-static SemaphoreHandle_t lock(void)
+esp_err_t sse_hub_init(void)
 {
     if (s_lock == NULL) {
-        s_lock = xSemaphoreCreateMutex();
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_storage);
     }
-    return s_lock;
+    return s_lock != NULL ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 /* Caller holds the lock. */
@@ -39,6 +41,10 @@ static void release_client(sse_client_t *client)
     if (!client->in_use) {
         return;
     }
+    /* Async completion frees the request but deliberately keeps its connection
+     * alive. End the unframed stream first so EventSource receives EOF and the
+     * HTTP server can perform the final close when it resumes socket polling. */
+    (void) shutdown(client->sockfd, SHUT_RDWR);
     (void) httpd_req_async_handler_complete(client->request);
     memset(client, 0, sizeof(*client));
 }
@@ -63,9 +69,9 @@ esp_err_t sse_hub_add_client(httpd_req_t *req)
         return ESP_ERR_INVALID_ARG;
     }
 
-    SemaphoreHandle_t handle = lock();
+    SemaphoreHandle_t handle = s_lock;
     if (handle == NULL) {
-        return ESP_ERR_NO_MEM;
+        return ESP_ERR_INVALID_STATE;
     }
 
     xSemaphoreTake(handle, portMAX_DELAY);
@@ -108,7 +114,7 @@ void sse_hub_broadcast(const char *frame, size_t length)
     if (frame == NULL || length == 0U) {
         return;
     }
-    SemaphoreHandle_t handle = lock();
+    SemaphoreHandle_t handle = s_lock;
     if (handle == NULL) {
         return;
     }
@@ -128,7 +134,7 @@ void sse_hub_broadcast(const char *frame, size_t length)
 
 size_t sse_hub_client_count(void)
 {
-    SemaphoreHandle_t handle = lock();
+    SemaphoreHandle_t handle = s_lock;
     if (handle == NULL) {
         return 0U;
     }
@@ -145,7 +151,7 @@ size_t sse_hub_client_count(void)
 
 void sse_hub_close_all(void)
 {
-    SemaphoreHandle_t handle = lock();
+    SemaphoreHandle_t handle = s_lock;
     if (handle == NULL) {
         return;
     }

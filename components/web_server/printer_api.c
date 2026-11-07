@@ -83,7 +83,7 @@ static esp_err_t read_body(httpd_req_t *req, char **out) {
   *out = body;
   return ESP_OK;
 }
-enum { CONFIG_SAVE, CONFIG_FORGET, CYCLE_ARM, CYCLE_STOP };
+enum { CONFIG_SAVE, CONFIG_FORGET, MONITOR_START, MONITOR_STOP };
 static esp_err_t mutate(httpd_req_t *req, unsigned operation) {
   if (!firmware_api_request_trusted(req))
     return http_request_close_json(req, "403 Forbidden", "{\"error\":\"request_origin\"}");
@@ -102,27 +102,20 @@ static esp_err_t mutate(httpd_req_t *req, unsigned operation) {
       err = s_ops.request_printer_config
                 ? s_ops.request_printer_config(&request)
                 : ESP_ERR_INVALID_STATE;
-  } else if (operation == CYCLE_ARM) {
-    printer_arm_request_t request;
-    if (printer_api_parse_arm(body, req->content_len, &request))
-      err = s_ops.arm_printer_cycle ? s_ops.arm_printer_cycle(&request)
-                                    : ESP_ERR_INVALID_STATE;
   } else if (printer_api_empty_body(body, req->content_len)) {
-    if (operation == CONFIG_FORGET)
-      err = s_ops.forget_printer_config ? s_ops.forget_printer_config()
-                                        : ESP_ERR_INVALID_STATE;
-    else
-      err = s_ops.stop_printer_cycle ? s_ops.stop_printer_cycle()
-                                     : ESP_ERR_INVALID_STATE;
+    esp_err_t (*action)(void) = operation == CONFIG_FORGET ? s_ops.forget_printer_config
+                                : operation == MONITOR_START ? s_ops.start_printer_monitor
+                                                             : s_ops.stop_printer_monitor;
+    err = action ? action() : ESP_ERR_INVALID_STATE;
   }
   memset(body, 0, req->content_len);
   free(body);
-  return result(req, err, operation == CONFIG_SAVE || operation == CYCLE_ARM);
+  return result(req, err, operation == CONFIG_SAVE);
 }
 static esp_err_t save(httpd_req_t *r) { return mutate(r, CONFIG_SAVE); }
 static esp_err_t forget(httpd_req_t *r) { return mutate(r, CONFIG_FORGET); }
-static esp_err_t arm(httpd_req_t *r) { return mutate(r, CYCLE_ARM); }
-static esp_err_t stop(httpd_req_t *r) { return mutate(r, CYCLE_STOP); }
+static esp_err_t monitor(httpd_req_t *r) { return mutate(r, MONITOR_START); }
+static esp_err_t stop(httpd_req_t *r) { return mutate(r, MONITOR_STOP); }
 esp_err_t printer_api_register(httpd_handle_t server,
                                const web_server_ops_t *ops) {
   if (!server || !ops)
@@ -132,8 +125,8 @@ esp_err_t printer_api_register(httpd_handle_t server,
       {.uri = "/api/printer", .method = HTTP_GET, .handler = get_printer},
       {.uri = "/api/printer/config", .method = HTTP_PUT, .handler = save},
       {.uri = "/api/printer/config", .method = HTTP_DELETE, .handler = forget},
-      {.uri = "/api/printer/cycle", .method = HTTP_POST, .handler = arm},
-      {.uri = "/api/printer/cycle/stop", .method = HTTP_POST, .handler = stop}};
+      {.uri = "/api/printer/monitor", .method = HTTP_POST, .handler = monitor},
+      {.uri = "/api/printer/monitor/stop", .method = HTTP_POST, .handler = stop}};
   for (unsigned i = 0; i < sizeof(routes) / sizeof(*routes); ++i) {
     esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
     if (err != ESP_OK)

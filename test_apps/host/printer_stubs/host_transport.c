@@ -81,7 +81,14 @@ void esp_transport_ssl_set_common_name(esp_transport_handle_t t,
   (void)t;
   assert(!strcmp(name, "SERIAL123"));
 }
-bool printer_socket_nonblocking(int fd) {
-  assert(fd == 42);
+#ifndef HOST_TRANSPORT_NO_SOCKET_HELPERS
+bool printer_socket_nonblocking_begin(int fd, int *saved_flags) {
+  assert(fd == 42 && saved_flags);
+  *saved_flags = 0;
   return true;
 }
+bool printer_socket_restore(int fd, int saved_flags) {
+  assert(fd == 42 && saved_flags == 0);
+  return true;
+}
+#endif

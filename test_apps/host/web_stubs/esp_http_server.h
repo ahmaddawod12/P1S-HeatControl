@@ -12,3 +12,6 @@ typedef struct {
 esp_err_t httpd_start(httpd_handle_t *, const httpd_config_t *);
 esp_err_t httpd_stop(httpd_handle_t);
 int httpd_req_to_sockfd(httpd_req_t *);
+esp_err_t httpd_req_async_handler_begin(httpd_req_t *, httpd_req_t **);
+esp_err_t httpd_req_async_handler_complete(httpd_req_t *);
+int httpd_socket_send(httpd_handle_t, int, const char *, size_t, int);

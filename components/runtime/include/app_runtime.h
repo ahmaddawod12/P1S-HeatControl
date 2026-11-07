@@ -6,7 +6,6 @@
 #include "app_types.h"
 #include "esp_err.h"
 #include "temperature_sensor.h"
-#include "runtime_auto_types.h"
 
 /* Injection boundary for the sensor, relay outputs, and setting
  * persistence. Tests supply fakes; production wiring lives in
@@ -43,7 +42,12 @@ esp_err_t app_runtime_ack_fault(void);
 
 void app_runtime_set_network_status(int8_t rssi, const char *ip_addr);
 void app_runtime_get_status(app_status_t *out_status);
-esp_err_t app_runtime_auto_acquire(uint64_t cycle_id,float target_c,uint64_t expires_ms);
-esp_err_t app_runtime_auto_renew(uint64_t cycle_id,uint64_t expires_ms);
-void app_runtime_auto_revoke(uint64_t cycle_id);
-void app_runtime_get_auto_status(runtime_auto_status_t *out);
+/* Printer monitoring. While active, the heater element may run only while the
+ * latest permit is current; a missing renewal holds it off (fail-safe).
+ * Monitoring ends by itself whenever heating is disabled (Disable, fault,
+ * maintenance). A permit at or before now starts/keeps the heater held. */
+#define APP_RUNTIME_MONITOR_PERMIT_MAX_MS 5000U
+esp_err_t app_runtime_monitor_begin(uint64_t permit_until_ms);
+esp_err_t app_runtime_monitor_permit(uint64_t permit_until_ms);
+void app_runtime_monitor_end(bool disable_heating);
+bool app_runtime_monitor_active(void);

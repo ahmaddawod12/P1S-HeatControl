@@ -24,8 +24,8 @@ esp_err_t wifi_manager_request_credentials(const wifi_credentials_t *s) {(void)s
 void printer_control_get_status(printer_control_status_t *s) {(void)s;UNUSED();}
 esp_err_t printer_control_request_config(const printer_config_request_t *s) {(void)s;UNUSED();}
 esp_err_t printer_control_forget_config(void) {UNUSED();}
-esp_err_t printer_control_arm(const printer_arm_request_t *s) {(void)s;UNUSED();}
-esp_err_t printer_control_stop(void) {UNUSED();}
+esp_err_t printer_control_monitor_start(void) {UNUSED();}
+esp_err_t printer_control_monitor_stop(void) {UNUSED();}
 void diagnostics_snapshot(diagnostic_record_t *r,size_t cap,size_t *count) {(void)r;(void)cap;(void)count;UNUSED();}
 esp_err_t sse_hub_add_client(httpd_req_t *r) {(void)r;UNUSED();}
 void sse_hub_close_all(void) {UNUSED();}

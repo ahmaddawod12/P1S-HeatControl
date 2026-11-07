@@ -1,5 +1,13 @@
 # P1S Preheat and Resume Implementation Plan
 
+> **Superseded (2026-11-08)** by the [Monitor P1S design](../specs/2026-11-07-monitor-p1s-design.md).
+
+Historical plan: its build-time qualification-gate instructions were superseded
+by the owner's 2026-11-07 request. Current behavior is specified in
+[paused-target Resume design](../specs/2026-11-07-paused-target-resume-design.md).
+The later request also supersedes initial-pause/job-identity admission,
+checkbox confirmation and settling rules in this historical plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let the PC prepare a deliberately paused P1S print, then let the ESP32 preheat the chamber, send one Resume attempt, maintain temperature, and disable chamber heating when that run ends.

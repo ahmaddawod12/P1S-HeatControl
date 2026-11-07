@@ -1,14 +1,11 @@
 #include "printer_report.h"
 #include <ctype.h>
-#include <errno.h>
-#include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Streaming validation/projection: bounded recursion, no heap or token tree. */
 typedef struct {
   const char *s, *end;
-  printer_report_delta_t d;
+  printer_report_t r;
   bool print_seen, command_ok;
 } parser_t;
 static void ws(parser_t *p) {
@@ -209,24 +206,6 @@ static bool value(parser_t *p, unsigned depth) {
     return literal(p, "null");
   return number(p, NULL, 0);
 }
-static bool uint_value(parser_t *p, uint64_t *out) {
-  char s[32];
-  ws(p);
-  bool ok = p->s < p->end && *p->s == '"' ? string(p, s, sizeof(s))
-                                          : number(p, s, sizeof(s));
-  if (!ok || !s[0])
-    return false;
-  for (size_t i = 0; s[i]; i++)
-    if (!isdigit((unsigned char)s[i]))
-      return false;
-  errno = 0;
-  char *end;
-  unsigned long long v = strtoull(s, &end, 10);
-  if (errno || *end)
-    return false;
-  *out = (uint64_t)v;
-  return true;
-}
 static printer_run_state_t state(const char *s) {
   if (!strcmp(s, "IDLE"))
     return PRINTER_RUN_IDLE;
@@ -242,6 +221,7 @@ static printer_run_state_t state(const char *s) {
     return PRINTER_RUN_FAILED;
   return PRINTER_RUN_UNKNOWN;
 }
+/* Validates the whole print object; keeps only gcode_state. */
 static bool print_object(parser_t *p) {
   if (!take(p, '{'))
     return false;
@@ -253,85 +233,20 @@ static bool print_object(parser_t *p) {
     char key[64];
     if (!string(p, key, sizeof(key)) || !take(p, ':'))
       return false;
-    const char *keys[] = {"gcode_state",       "layer_num",  "gcode_start_time",
-                          "task_id",           "subtask_id", "gcode_file",
-                          "subtask_name",      "print_type", "mc_percent",
-                          "mc_remaining_time", "bed_temper", "nozzle_temper",
-                          "print_error",       "hms"};
-    unsigned index = 0;
-    for (; index < 14; index++)
-      if (!strcmp(key, keys[index]))
-        break;
-    if (index == 14) {
-      if (!strcmp(key, "command")) {
-        char cmd[48];
-        if (command_seen || !string(p, cmd, sizeof(cmd)))
-          return false;
-        command_seen = true;
-        p->command_ok = !strcmp(cmd, "push_status");
-      } else if (!value(p, 2))
+    if (!strcmp(key, "gcode_state")) {
+      char s[48];
+      if (p->r.has_state || !string(p, s, sizeof(s)))
         return false;
-    } else {
-      uint32_t bit = 1U << index;
-      if (p->d.present & bit)
+      p->r.has_state = true;
+      p->r.state = state(s);
+    } else if (!strcmp(key, "command")) {
+      char cmd[48];
+      if (command_seen || !string(p, cmd, sizeof(cmd)))
         return false;
-      p->d.present |= bit;
-      if (index == 0) {
-        char s[48];
-        if (!string(p, s, sizeof(s)))
-          return false;
-        p->d.state = state(s);
-      } else if (index >= 3 && index <= 7) {
-        char *dest = index == 3   ? p->d.task
-                     : index == 4 ? p->d.subtask
-                     : index == 5 ? p->d.file
-                     : index == 6 ? p->d.label
-                                  : p->d.print_type;
-        size_t cap = index == 5 ? 257 : index == 6 ? 97 : index == 7 ? 33 : 65;
-        if (!string(p, dest, cap))
-          return false;
-      } else if (index == 10 || index == 11) {
-        char s[64];
-        if (!number(p, s, sizeof(s)))
-          return false;
-        double v = strtod(s, NULL);
-        if (!isfinite(v) || v < -273 || v > 2000)
-          return false;
-        if (index == 10)
-          p->d.bed_c = (float)v;
-        else
-          p->d.nozzle_c = (float)v;
-      } else if (index == 13) {
-        ws(p);
-        if (p->s == p->end || *p->s != '[')
-          return false;
-        const char *a = p->s + 1;
-        while (a < p->end && strchr(" \t\r\n", *a))
-          a++;
-        p->d.hms_blocking = a == p->end || *a != ']';
-        if (!value(p, 2))
-          return false;
-      } else {
-        uint64_t v;
-        if (!uint_value(p, &v))
-          return false;
-        if (index != 2 && v > UINT32_MAX)
-          return false;
-        if (index == 1)
-          p->d.layer = (uint32_t)v;
-        else if (index == 2)
-          p->d.start_time = v;
-        else if (index == 8) {
-          if (v > 100)
-            return false;
-          p->d.progress = (int)v;
-        } else if (index == 9) {
-          if (v > INT32_MAX)
-            return false;
-          p->d.remaining = (int)v;
-        } else
-          p->d.error = (uint32_t)v;
-      }
+      command_seen = true;
+      p->command_ok = !strcmp(cmd, "push_status");
+    } else if (!value(p, 2)) {
+      return false;
     }
     ws(p);
     if (take(p, '}'))
@@ -340,7 +255,7 @@ static bool print_object(parser_t *p) {
   return false;
 }
 esp_err_t printer_report_parse(const char *json, size_t len,
-                               printer_report_delta_t *out) {
+                               printer_report_t *out) {
   if (!json || !out || !len || len > PRINTER_REPORT_MAX || memchr(json, 0, len))
     return ESP_ERR_INVALID_ARG;
   parser_t p = {.s = json, .end = json + len, .command_ok = true};
@@ -365,9 +280,9 @@ esp_err_t printer_report_parse(const char *json, size_t len,
   ws(&p);
   if (p.s != p.end)
     return ESP_ERR_INVALID_RESPONSE;
-  if (!p.print_seen || !p.command_ok || !p.d.present)
+  if (!p.print_seen || !p.command_ok)
     return ESP_ERR_NOT_FOUND;
-  *out = p.d;
+  *out = p.r;
   return ESP_OK;
 }
 printer_frame_result_t printer_frame_feed(printer_frame_t *f,

@@ -1,7 +1,8 @@
-"""Check the known deep HTTP arm path in an ESP32/IDF 6.1 build, read-only.
+"""Check the deep HTTP Monitor P1S paths in an ESP32/IDF 6.1 build, read-only.
 
-This guards a reproduced compiled-stack overflow. It does not replace runtime
-high-water measurements or bound indirect calls beyond the listed path.
+This guards a previously reproduced compiled-stack overflow on the printer HTTP
+handlers. It does not replace runtime high-water measurements or bound indirect
+calls beyond the listed paths.
 """
 import argparse
 import json
@@ -9,13 +10,20 @@ from pathlib import Path
 import re
 import subprocess
 
-# Includes HTTPD's handler callback and the configured native heat callback.
-ARM_PATH = (
+# HTTPD's handler callback down to the configured native runtime callbacks.
+HTTPD = (
     "vPortTaskWrapper", "httpd_thread", "httpd_server", "httpd_sess_enum",
     "httpd_process_session", "httpd_sess_process", "httpd_req_new",
-    "httpd_parse_req", "httpd_uri", "arm", "mutate", "printer_control_arm",
-    "input", "heat", "app_runtime_get_status", "xQueueSemaphoreTake",
+    "httpd_parse_req", "httpd_uri",
 )
+MONITOR_PATHS = {
+    "start_status": HTTPD + ("monitor", "mutate", "printer_control_monitor_start",
+                             "heat", "app_runtime_get_status", "xQueueSemaphoreTake"),
+    "start_permit": HTTPD + ("monitor", "mutate", "printer_control_monitor_start",
+                             "begin", "app_runtime_monitor_begin", "xQueueSemaphoreTake"),
+    "stop": HTTPD + ("stop", "mutate", "printer_control_monitor_stop",
+                     "end_monitor", "app_runtime_monitor_end", "xQueueSemaphoreTake"),
+}
 # Classic ESP32: 96-byte coprocessor save area + 16-byte TLS in this build,
 # plus the 192-byte low-interrupt entry frame before switching to ISR stack.
 ABI_AND_INTERRUPT_BYTES = 96 + 16 + 192
@@ -41,13 +49,19 @@ def check(build, stack_bytes=4096, margin=512):
         entry = re.search(r"\bentry\s+a1,\s*(0x[0-9a-f]+|[0-9]+)", line)
         if entry and symbol:
             frames[symbol] = int(entry[1], 0)
-    missing = [name for name in ARM_PATH if name not in frames]
+    names = sorted({name for path in MONITOR_PATHS.values() for name in path})
+    missing = [name for name in names if name not in frames]
     if missing:
         raise ValueError("reassess compiled path; missing symbols: " + ", ".join(missing))
-    call_bytes = sum(frames[name] for name in ARM_PATH)
-    required = call_bytes + ABI_AND_INTERRUPT_BYTES + margin
-    result = {"frames": {name: frames[name] for name in ARM_PATH},
-              "call_bytes": call_bytes, "abi_interrupt_bytes": ABI_AND_INTERRUPT_BYTES,
+    paths = {}
+    for label, path in MONITOR_PATHS.items():
+        call_bytes = sum(frames[name] for name in path)
+        paths[label] = {"call_bytes": call_bytes,
+                        "required_bytes": call_bytes + ABI_AND_INTERRUPT_BYTES + margin}
+    deepest = max(paths, key=lambda label: paths[label]["required_bytes"])
+    required = paths[deepest]["required_bytes"]
+    result = {"frames": {name: frames[name] for name in names}, "paths": paths,
+              "deepest_path": deepest, "abi_interrupt_bytes": ABI_AND_INTERRUPT_BYTES,
               "margin_bytes": margin, "required_bytes": required,
               "http_stack_bytes": stack_bytes, "fits": required <= stack_bytes}
     return result

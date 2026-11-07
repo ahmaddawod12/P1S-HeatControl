@@ -4,6 +4,8 @@
 typedef void *httpd_handle_t;
 typedef enum { HTTP_GET, HTTP_PUT, HTTP_DELETE, HTTP_POST } httpd_method_t;
 typedef struct httpd_req {
+  httpd_handle_t handle;
+  int fd;
   size_t content_len;
   httpd_method_t method;
   void *user_ctx;

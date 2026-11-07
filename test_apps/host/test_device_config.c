@@ -175,8 +175,7 @@ int main(void) {
   printer_connection_config_t p = {.enabled = true,
                                    .ipv4 = "192.168.1.9",
                                    .serial = "ABC123",
-                                   .access_code = " exact code ",
-                                   .ntp_host = "pool.ntp.org"},
+                                   .access_code = " exact code "},
                               loaded;
   assert(device_config_load_printer(&loaded) == ESP_ERR_NOT_FOUND);
   assert(printer_config_valid(&p));
@@ -184,6 +183,21 @@ int main(void) {
   assert(device_config_load_printer(&loaded) == ESP_OK &&
          !strcmp(loaded.access_code, " exact code "));
   assert(!strcmp(loaded.serial, "ABC123"));
+  /* save_zeroes_time_server_bytes: the former time-server field stays empty. */
+  record_t *stored = NULL;
+  for (unsigned i = 0; i < 6; i++)
+    if (!strcmp(records[i].key, "printer_v1"))
+      stored = &records[i];
+  assert(stored && stored->size == 376);
+  for (size_t i = 122; i < 376; i++)
+    assert(stored->bytes[i] == 0);
+  /* old_record_with_time_server_loads: records written by earlier firmware. */
+  memcpy(stored->bytes + 122, "pool.ntp.org", 12);
+  assert(device_config_load_printer(&loaded) == ESP_OK);
+  assert(!strcmp(loaded.ipv4, "192.168.1.9") && !strcmp(loaded.serial, "ABC123") &&
+         !strcmp(loaded.access_code, " exact code ") && loaded.enabled);
+  memcpy(stored->bytes + 122, "a..b", 5);
+  assert(device_config_load_printer(&loaded) == ESP_OK);
   commit_result = ESP_FAIL;
   strcpy(p.serial, "CHANGED");
   assert(device_config_save_printer(&p) == ESP_FAIL);
@@ -208,11 +222,6 @@ int main(void) {
     assert(!printer_config_valid(&p));
   }
   strcpy(p.ipv4, "192.168.1.9");
-  strcpy(p.ntp_host, "a..b");
-  assert(!printer_config_valid(&p));
-  strcpy(p.ntp_host, "-bad.example");
-  assert(!printer_config_valid(&p));
-  strcpy(p.ntp_host, "time.local");
   assert(printer_config_valid(&p));
   test_bad_or_future_config_is_not_erased();
   puts("device configuration passed");

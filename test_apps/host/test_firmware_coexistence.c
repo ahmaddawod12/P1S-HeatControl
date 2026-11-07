@@ -32,7 +32,7 @@ void firmware_job_run(firmware_status_t *status,const firmware_job_ops_t *ops,fi
 static void run(void){notifications=polls=0;assert(firmware_update_request()==ESP_OK);if(!setjmp(finished))worker(NULL);assert(!suspended && service_operation_current()==SERVICE_OPERATION_NONE);}
 int main(void){
     assert(firmware_update_start()==ESP_OK);
-    assert(service_operation_begin(SERVICE_OPERATION_PRINTER_CYCLE));assert(firmware_update_request()==ESP_ERR_NOT_ALLOWED);service_operation_end(SERVICE_OPERATION_PRINTER_CYCLE);
+    assert(service_operation_begin(SERVICE_OPERATION_PRINTER_CONFIG));assert(firmware_update_request()==ESP_ERR_NOT_ALLOWED);service_operation_end(SERVICE_OPERATION_PRINTER_CONFIG);
     run();assert(jobs==1 && now>=200);
     blocked=true;run();assert(jobs==1 && now>=5200 && s_status.result==FIRMWARE_RESULT_CHECK_FAILED);return 0;
 }

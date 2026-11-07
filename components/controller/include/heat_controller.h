@@ -31,6 +31,8 @@ typedef struct {
     heat_fault_t fault;
     bool enabled;
     bool output_on;
+    /* Printer monitoring holds the element off while heating stays enabled. */
+    bool inhibited;
     float target_c;
 } heat_controller_snapshot_t;
 
@@ -48,6 +50,11 @@ bool heat_controller_command(heat_controller_t *controller,
                              const heat_controller_command_t *command,
                              const temperature_sample_t *sample,
                              uint64_t now_ms);
+/* While inhibited an enabled controller keeps its element off (HOLDING).
+ * Releasing waits for the next step and the normal minimum transition time. */
+void heat_controller_set_inhibit(heat_controller_t *controller,
+                                 bool inhibited,
+                                 uint64_t now_ms);
 void heat_controller_step(heat_controller_t *controller,
                           const temperature_sample_t *sample,
                           uint64_t now_ms);
