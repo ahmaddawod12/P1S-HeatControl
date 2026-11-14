@@ -38,11 +38,11 @@ as 1.1.0 without CI, superseding the earlier 1.0.1 release request.
 ### Task 2: Verification and source snapshot
 
 - [x] Build and run the host tests, dashboard tests, Python tool tests, and publisher safeguard tests.
-- [ ] Commit the version metadata with [skip ci] and verify clean source state.
-- [ ] Rebuild v1.1.0, check stack use, sign with the existing key, and validate the generic package.
+- [x] Commit the version metadata with [skip ci] and verify clean source state.
+- [x] Rebuild v1.1.0, check stack use, sign with the existing key, and validate the generic package.
 
 ### Task 3: Publication
 
-- [ ] Push the reviewed source to main without CI and use tools/publish_firmware.ps1 to publish directly.
-- [ ] Confirm stable v1.1.0, the exact source tag, both public assets, and cancellation of the old workflow.
-- [ ] Download both assets anonymously and verify their signature, version, and manifest digest.
+- [x] Push the reviewed source to main without CI and use tools/publish_firmware.ps1 to publish directly.
+- [x] Confirm stable v1.1.0, the exact source tag, both public assets, and cancellation of the old workflow.
+- [x] Download both assets anonymously and verify their signature, version, and manifest digest.
