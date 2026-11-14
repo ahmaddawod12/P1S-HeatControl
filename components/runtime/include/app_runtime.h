@@ -49,5 +49,7 @@ void app_runtime_get_status(app_status_t *out_status);
 #define APP_RUNTIME_MONITOR_PERMIT_MAX_MS 5000U
 esp_err_t app_runtime_monitor_begin(uint64_t permit_until_ms);
 esp_err_t app_runtime_monitor_permit(uint64_t permit_until_ms);
+/* Disables heating only if this monitor still owns the current Enable epoch;
+ * a stale completion after owner Disable cannot stop later manual heating. */
 void app_runtime_monitor_end(bool disable_heating);
 bool app_runtime_monitor_active(void);

@@ -224,7 +224,7 @@ int main(void) {
   request(HTTP_POST, "/api/printer/monitor", body, 204);
   request(HTTP_POST, "/api/printer/monitor", body, 409);
   request(HTTP_POST, "/api/printer/monitor/stop", "{}", 204);
-  request(HTTP_DELETE, "/api/printer/config", "", 204);
+  request(HTTP_DELETE, "/api/printer/config", "", 202);
   assert(stop_calls == 1);
   request(HTTP_PUT, "/api/printer/config",
           "{\"enabled\":true,\"ipv4\":\"192.168.1.20\",\"serial\":"

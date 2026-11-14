@@ -20,7 +20,7 @@ static atomic_uint saves;
 static atomic_int sensor_fault;
 static _Atomic float sensor_temperature_c = 25.0f;
 static atomic_int save_result = ESP_OK;
-static atomic_bool slow_sensor, late_sample;
+static atomic_bool slow_sensor, late_sample, early_sample;
 static atomic_uint slow_reads;
 static atomic_ullong last_slow_read_ms;
 static atomic_bool stall_sensor, stall_entered, release_stall;
@@ -58,7 +58,8 @@ esp_err_t temperature_sensor_read(temperature_sensor_t *device, temperature_sens
     if (atomic_load(&slow_sensor)) {
         const uint64_t started_ms = (uint64_t) esp_timer_get_time() / 1000;
         const uint64_t previous_ms = atomic_exchange(&last_slow_read_ms, started_ms);
-        if (previous_ms && started_ms - previous_ms > 650U) atomic_store(&late_sample, true);
+        if (previous_ms && started_ms - previous_ms > 1150U) atomic_store(&late_sample, true);
+        if (previous_ms && started_ms - previous_ms < 850U) atomic_store(&early_sample, true);
         atomic_fetch_add(&slow_reads, 1);
         vTaskDelay(pdMS_TO_TICKS(400)); /* Real DS18B20 driver conversion wait. */
     }
@@ -121,7 +122,10 @@ static void urgent_disable_discards_previously_queued_enables(void)
     for(unsigned round=0;round<20;round++) {
         enable();
         for(unsigned i=0;i<32;i++) (void)app_runtime_set_enabled(true);
-        if(round&1) app_runtime_monitor_end(true);
+        if(round&1) {
+            assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+            app_runtime_monitor_end(true);
+        }
         else assert(app_runtime_set_enabled(false)==ESP_OK);
         (void)wait_status(true,false,2000);
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -266,8 +270,8 @@ static void blocked_save_does_not_delay_sensor_fault(void)
 {
     start(); enable(); begin_blocked_save();
     atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_OPEN);
-    const app_status_t status = wait_fault(HEAT_FAULT_SENSOR_OPEN, 1500);
-    assert(!status.enabled && !status.fan_on && !atomic_load(&heater));
+    const app_status_t status = wait_fault(HEAT_FAULT_SENSOR_OPEN, 6000);
+    assert(!status.enabled && status.fan_on && !atomic_load(&heater));
     finish_blocked_save(ESP_OK);
     atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_NONE);
     app_runtime_stop();
@@ -352,7 +356,7 @@ static void fault_survives_maintenance(heat_fault_t fault)
         app_runtime_get_status(&status);
         if (status.state == HEAT_STATE_FAULT) break;
         vTaskDelay(pdMS_TO_TICKS(20));
-    } while (now_ms() - began < 2000);
+    } while (now_ms() - began < 6000);
     assert(status.state == HEAT_STATE_FAULT && status.fault == fault);
     assert(app_runtime_begin_maintenance(1000) == ESP_OK);
     atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_NONE);
@@ -374,17 +378,102 @@ static void fault_survives_maintenance(heat_fault_t fault)
 
 static void conversion_wait_preserves_cadence_and_stop_response(void)
 {
+    atomic_store(&last_slow_read_ms, 0U);
+    atomic_store(&slow_reads, 0U);
+    atomic_store(&early_sample, false);
+    atomic_store(&late_sample, false);
     atomic_store(&slow_sensor, true);
     start();
     assert(atomic_load(&slow_reads) >= 3);
     assert(!atomic_load(&late_sample));
+    assert(!atomic_load(&early_sample));
     enable();
+    app_status_t status;
+    app_runtime_get_status(&status);
+    uint64_t last_control_ms = status.uptime_ms;
+    unsigned control_ticks = 0U;
+    const uint64_t checking_since = now_ms();
+    while (control_ticks < 3U && now_ms() - checking_since < 2200U) {
+        app_runtime_get_status(&status);
+        if (status.uptime_ms != last_control_ms) {
+            const uint64_t interval_ms = status.uptime_ms - last_control_ms;
+            assert(interval_ms >= 400U && interval_ms <= 750U);
+            last_control_ms = status.uptime_ms;
+            ++control_ticks;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    assert(control_ticks == 3U);
     const uint64_t began = now_ms();
     assert(app_runtime_set_enabled(false) == ESP_OK);
     (void) wait_status(false, false, 1000);
-    assert(now_ms() - began < 400U);
+    assert(now_ms() - began < 750U);
     app_runtime_stop();
     atomic_store(&slow_sensor, false);
+}
+
+static app_status_t wait_failure_count(unsigned count, uint32_t timeout_ms)
+{
+    const uint64_t began = now_ms();
+    app_status_t status;
+    do {
+        app_runtime_get_status(&status);
+        if (status.temperature.consecutive_failures == count) return status;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    } while (now_ms() - began < timeout_ms);
+    fprintf(stderr, "wanted %u failed acquisitions, got %u (fault=%d)\n",
+            count, status.temperature.consecutive_failures, status.fault);
+    assert(!"sensor failure count did not reach expected value");
+    return status;
+}
+
+static void sensor_retry_success_resets_count_and_fifth_failure_latches(void)
+{
+    start();
+    enable();
+    atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_SHORT);
+    app_status_t status = wait_failure_count(4U, 5500U);
+    assert(status.heater_on && status.fan_on && status.enabled && status.fault == HEAT_FAULT_NONE);
+    atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_NONE);
+    status = wait_failure_count(0U, 1800U);
+    assert(status.temperature.valid && status.temperature.consecutive_valid == 1U);
+    assert(status.heater_on && status.enabled && status.fault == HEAT_FAULT_NONE);
+
+    atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_OPEN);
+    for (unsigned i = 1U; i <= 4U; ++i) {
+        status = wait_failure_count(i, 1800U);
+        assert(status.heater_on && status.enabled && status.fault == HEAT_FAULT_NONE);
+    }
+    status = wait_fault(HEAT_FAULT_SENSOR_OPEN, 1800U);
+    assert(status.temperature.consecutive_failures == 5U);
+    assert(!status.heater_on && !status.enabled && status.fan_on);
+    assert(app_runtime_ack_fault() == ESP_ERR_NOT_ALLOWED);
+    atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_NONE);
+    status = wait_failure_count(0U, 1800U);
+    assert(status.state == HEAT_STATE_FAULT && !status.heater_on);
+    assert(app_runtime_ack_fault() == ESP_ERR_NOT_ALLOWED);
+    (void) wait_status(true, false, 4000U);
+    assert(app_runtime_ack_fault() == ESP_OK);
+    app_runtime_get_status(&status);
+    assert(status.state == HEAT_STATE_IDLE && !status.enabled && !status.heater_on && status.fan_on);
+    app_runtime_stop();
+}
+
+static void acquisition_stall_after_failed_read_still_shuts_down(void)
+{
+    start();
+    enable();
+    atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_SHORT);
+    app_status_t status = wait_failure_count(1U, 1800U);
+    assert(status.heater_on && status.fault == HEAT_FAULT_NONE);
+    atomic_store(&stall_sensor, true);
+    status = wait_fault(HEAT_FAULT_SENSOR_STALE, 3200U);
+    assert(status.temperature.consecutive_failures == 1U);
+    assert(!status.enabled && !status.heater_on && status.fan_on);
+    atomic_store(&sensor_fault, TEMPERATURE_SENSOR_FAULT_NONE);
+    atomic_store(&stall_sensor, false);
+    atomic_store(&release_stall, true);
+    app_runtime_stop();
 }
 
 static void stalled_acquisition_shuts_down_and_requires_three_fresh_samples(void)
@@ -406,7 +495,7 @@ static void stalled_acquisition_shuts_down_and_requires_three_fresh_samples(void
         vTaskDelay(pdMS_TO_TICKS(20));
     } while (now_ms() - last_sample_ms < 2800U);
     assert(status.state == HEAT_STATE_FAULT && status.fault == HEAT_FAULT_SENSOR_STALE);
-    assert(!status.heater_on && !status.fan_on && !status.enabled);
+    assert(!status.heater_on && status.fan_on && !status.enabled);
     assert(!status.temperature.valid && status.temperature.consecutive_valid == 0);
 
     atomic_store(&stall_sensor, false);
@@ -462,7 +551,7 @@ static void acknowledgement_reports_controller_decision(const char *scenario)
     else if(fault==HEAT_FAULT_SENSOR_STALE)atomic_store(&stall_sensor,true);
     else if(fault==HEAT_FAULT_OVERTEMP)atomic_store(&sensor_temperature_c,85);
     else assert(app_runtime_report_startup_fault(fault)==ESP_OK);
-    (void)wait_fault(fault,3500);
+    (void)wait_fault(fault, fault == HEAT_FAULT_SENSOR_OPEN ? 6000U : 3500U);
 
     if(!strcmp(scenario,"ack_expired") || !strcmp(scenario,"ack_early_timeout")) {
         host_control_queue_pause(true);
@@ -519,7 +608,7 @@ static void runtime_records_transition_history(void)
     assert(records[0].fault==HEAT_FAULT_NONE && records[0].timestamp_ms>0);
     enable();
     atomic_store(&sensor_fault,TEMPERATURE_SENSOR_FAULT_OPEN);
-    (void)wait_fault(HEAT_FAULT_SENSOR_OPEN,1500);
+    (void)wait_fault(HEAT_FAULT_SENSOR_OPEN,6000);
     diagnostics_snapshot(records,DIAGNOSTICS_CAPACITY,&count);
     assert(count==3 && records[1].from_state==HEAT_STATE_IDLE && records[1].to_state==HEAT_STATE_HEATING);
     assert(records[2].from_state==HEAT_STATE_HEATING && records[2].to_state==HEAT_STATE_FAULT);
@@ -613,6 +702,26 @@ static void monitor_end_choices(void)
     assert(!status.enabled);
     app_runtime_stop();
 }
+static void monitor_disable_and_enable_in_one_iteration(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(0) == ESP_OK);
+    (void) wait_status(true, false, 2000);
+    host_control_queue_pause(true);
+    const uint64_t began = now_ms();
+    while (!host_control_queue_is_paused() && now_ms() - began < 1000)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    assert(host_control_queue_is_paused());
+    assert(app_runtime_set_enabled(false) == ESP_OK);
+    assert(app_runtime_set_enabled(true) == ESP_OK);
+    host_control_queue_pause(false);
+    wait_monitor_inactive(1000);
+    const app_status_t status = wait_status(true, true, 7000);
+    assert(status.enabled);
+    assert(app_runtime_monitor_permit(now_ms() + 5000U) == ESP_ERR_INVALID_STATE);
+    app_runtime_stop();
+}
 static void monitor_maintenance_ends(void)
 {
     start();
@@ -624,13 +733,57 @@ static void monitor_maintenance_ends(void)
     app_runtime_stop();
 }
 
+static void monitor_stale_end_preserves_manual_heating(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    assert(app_runtime_set_enabled(false) == ESP_OK);
+    wait_monitor_inactive(1000);
+    enable();
+    /* A printer completion resumes after a newer manual heating session. */
+    app_runtime_monitor_end(true);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    app_status_t status;
+    app_runtime_get_status(&status);
+    assert(status.enabled && status.heater_on && !app_runtime_monitor_active());
+    app_runtime_stop();
+}
+
+static void monitor_pending_end_preserves_later_enable(void)
+{
+    start();
+    enable();
+    assert(app_runtime_monitor_begin(now_ms() + 5000U) == ESP_OK);
+    host_control_queue_pause(true);
+    const uint64_t began = now_ms();
+    while (!host_control_queue_is_paused() && now_ms() - began < 1000U)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    assert(host_control_queue_is_paused());
+    assert(app_runtime_set_enabled(false) == ESP_OK);
+    assert(app_runtime_set_enabled(true) == ESP_OK);
+    assert(app_runtime_monitor_active());
+    /* The old monitor is invalid even before the controller consumes Disable. */
+    app_runtime_monitor_end(true);
+    host_control_queue_pause(false);
+    wait_monitor_inactive(1000);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    app_status_t status;
+    app_runtime_get_status(&status);
+    assert(status.enabled && status.heater_on);
+    app_runtime_stop();
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
     if (argc == 2) {
-        if (strcmp(argv[1], "diagnostics") == 0) runtime_records_transition_history();
+        if (strcmp(argv[1], "retry_reset") == 0) sensor_retry_success_resets_count_and_fifth_failure_latches();
+        else if (strcmp(argv[1], "retry_stall") == 0) acquisition_stall_after_failed_read_still_shuts_down();
+        else if (strcmp(argv[1], "cadence") == 0) conversion_wait_preserves_cadence_and_stop_response();
+        else if (strcmp(argv[1], "diagnostics") == 0) runtime_records_transition_history();
         else if (strncmp(argv[1], "ack_",4) == 0) acknowledgement_reports_controller_decision(argv[1]);
         else if (strcmp(argv[1], "calibration") == 0) calibration_applies_live_and_survives_restart();
         else if (strcmp(argv[1], "calibration_overtemp") == 0) calibration_enforces_overtemperature_without_new_sensor_sample();
@@ -644,8 +797,11 @@ int main(int argc, char **argv)
         else if (strcmp(argv[1], "monitor_requires") == 0) monitor_requires_enabled_heating();
         else if (strcmp(argv[1], "monitor_permit") == 0) monitor_expired_permit_holds_heater();
         else if (strcmp(argv[1], "monitor_disable") == 0) monitor_disable_then_enable();
+        else if (strcmp(argv[1], "monitor_disable_enable") == 0) monitor_disable_and_enable_in_one_iteration();
         else if (strcmp(argv[1], "monitor_end") == 0) monitor_end_choices();
         else if (strcmp(argv[1], "monitor_maintenance") == 0) monitor_maintenance_ends();
+        else if (strcmp(argv[1], "monitor_stale_end") == 0) monitor_stale_end_preserves_manual_heating();
+        else if (strcmp(argv[1], "monitor_pending_end") == 0) monitor_pending_end_preserves_later_enable();
         else assert(!"unknown runtime persistence scenario");
         puts("runtime persistence safety regression passed");
         return 0;

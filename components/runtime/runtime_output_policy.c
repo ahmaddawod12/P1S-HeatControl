@@ -33,13 +33,17 @@ runtime_output_request_t runtime_output_policy_step(
     const bool operator_disabled =
         policy->was_enabled && !snapshot->enabled &&
         snapshot->state == HEAT_STATE_IDLE;
+    const bool fault_disabled =
+        snapshot->state == HEAT_STATE_FAULT &&
+        policy->was_enabled && !snapshot->enabled;
     policy->was_enabled = snapshot->enabled;
 
-    if (operator_disabled) {
+    if (operator_disabled || fault_disabled) {
         policy->fan_cooldown_deadline_ms =
             now_ms + DISABLE_FAN_COOLDOWN_MS;
     } else if (snapshot->state != HEAT_STATE_HOLDING &&
-               snapshot->state != HEAT_STATE_IDLE) {
+               snapshot->state != HEAT_STATE_IDLE &&
+               snapshot->state != HEAT_STATE_FAULT) {
         policy->fan_cooldown_deadline_ms = 0U;
     } else if (snapshot->state == HEAT_STATE_HOLDING && heater_is_on &&
                !snapshot->output_on) {

@@ -110,7 +110,7 @@ static esp_err_t mutate(httpd_req_t *req, unsigned operation) {
   }
   memset(body, 0, req->content_len);
   free(body);
-  return result(req, err, operation == CONFIG_SAVE);
+  return result(req, err, operation == CONFIG_SAVE || operation == CONFIG_FORGET);
 }
 static esp_err_t save(httpd_req_t *r) { return mutate(r, CONFIG_SAVE); }
 static esp_err_t forget(httpd_req_t *r) { return mutate(r, CONFIG_FORGET); }

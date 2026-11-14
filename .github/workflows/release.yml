@@ -1,0 +1,196 @@
+name: Release firmware
+
+on:
+  push:
+    branches: [main]
+    paths: [version.txt]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IDF_IMAGE: espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
+
+jobs:
+  prepare:
+    if: github.repository == 'ahmaddawod12/P1S-HeatControl' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check version, source and release notes
+        id: release
+        run: python3 tools/release_workflow.py
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Match the cJSON version used by the ESP-IDF managed component.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3 # v1.7.19
+          path: managed_components/espressif__cjson/cJSON
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Host tests
+        shell: msys2 {0}
+        run: |
+          cmake -S test_apps/host -B test_apps/host/build -G Ninja
+          cmake --build test_apps/host/build --parallel 2
+          ctest --test-dir test_apps/host/build --output-on-failure
+      - name: Dashboard tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Run dashboard tests
+        run: node --test test_apps/web/*.cjs
+      - name: Local publisher safeguards
+        shell: pwsh
+        run: ./test_apps/tools/test_publish_firmware.ps1
+
+  build:
+    needs: [prepare, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      P1S_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build generic firmware and run tool checks
+        run: |
+          docker run --rm --volume "$PWD:/project" --workdir /project "$IDF_IMAGE" bash -euc '
+            git config --global --add safe.directory /project
+            idf.py -B build-release -D SDKCONFIG=sdkconfig.release -D P1S_BOOTSTRAP_CREDENTIALS=OFF build
+            python -m unittest discover -s test_apps/tools -v
+            python tools/check_printer_stack.py --build build-release
+            idf.py -C test_apps/unit -B build-ci build
+          '
+      - name: Recheck committed source
+        run: python3 tools/release_workflow.py
+      - name: Sign and validate the two public assets
+        env:
+          OTA_SIGNING_PRIVATE_KEY: ${{ secrets.OTA_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$OTA_SIGNING_PRIVATE_KEY" ]; then
+            echo '::error::Configure the OTA_SIGNING_PRIVATE_KEY Actions secret with the existing ECDSA PEM key.'
+            exit 1
+          fi
+          key_file="$RUNNER_TEMP/p1s-ota-signing.pem"
+          trap 'rm -f -- "$key_file"' EXIT
+          umask 077
+          printf '%s\n' "$OTA_SIGNING_PRIVATE_KEY" > "$key_file"
+          docker run --rm --env P1S_VERSION \
+            --volume "$PWD:/project" --workdir /project \
+            --volume "$key_file:/run/secrets/ota-signing.pem:ro" \
+            "$IDF_IMAGE" bash -euc '
+              python -m espsecure sign-data --version 1 --keyfile /run/secrets/ota-signing.pem \
+                --output build-release/p1s-heat-controller-esp32-4mb.bin build-release/p1s_heat_controller.bin
+              python tools/package_firmware.py --build-dir build-release \
+                --public-key config/ota_signing_public.bin --version "$P1S_VERSION" \
+                --output "dist/firmware-$P1S_VERSION"
+              python tools/package_firmware.py --verify-package "dist/firmware-$P1S_VERSION" \
+                --build-dir build-release --public-key config/ota_signing_public.bin --version "$P1S_VERSION"
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ needs.prepare.outputs.tag }}-ota
+          path: |
+            dist/firmware-${{ needs.prepare.outputs.version }}/p1s-heat-controller-esp32-4mb.bin
+            dist/firmware-${{ needs.prepare.outputs.version }}/firmware.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      P1S_VERSION: ${{ needs.prepare.outputs.version }}
+      P1S_TAG: ${{ needs.prepare.outputs.tag }}
+      P1S_COMMIT: ${{ needs.prepare.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare.outputs.tag }}-ota
+          path: dist/firmware-${{ needs.prepare.outputs.version }}
+      - name: Recheck remote tags and exact source
+        id: release
+        run: |
+          git fetch --tags origin
+          python3 tools/release_workflow.py
+      - name: Verify signed package before publishing
+        if: steps.release.outputs.publish == 'true'
+        run: |
+          docker run --rm --env P1S_VERSION --volume "$PWD:/project:ro" --workdir /project \
+            "$IDF_IMAGE" python tools/package_firmware.py \
+              --verify-package "dist/firmware-$P1S_VERSION" \
+              --public-key config/ota_signing_public.bin --version "$P1S_VERSION"
+      - name: Publish stable release at the tested commit
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility="$(gh repo view "$GITHUB_REPOSITORY" --json visibility --jq .visibility)"
+          test "$visibility" = PUBLIC
+          # Creating the ref fails atomically if another publisher reserved this tag.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$P1S_TAG" -f sha="$P1S_COMMIT" > /dev/null
+          gh release create "$P1S_TAG" \
+            "dist/firmware-$P1S_VERSION/p1s-heat-controller-esp32-4mb.bin" \
+            "dist/firmware-$P1S_VERSION/firmware.json" \
+            --repo "$GITHUB_REPOSITORY" --target "$P1S_COMMIT" \
+            --verify-tag --title "Firmware $P1S_VERSION" --notes-file "docs/releases/$P1S_TAG.md" --latest
+      - name: Verify anonymous latest release and downloads
+        if: steps.release.outputs.publish == 'true'
+        run: |
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" \
+            --output "$RUNNER_TEMP/latest-release.json"
+          python3 -c 'import json, os; from pathlib import Path; r = json.loads((Path(os.environ["RUNNER_TEMP"]) / "latest-release.json").read_text()); assert r["tag_name"] == os.environ["P1S_TAG"] and not r["draft"] and not r["prerelease"]; assert {a["name"] for a in r["assets"]} == {"firmware.json", "p1s-heat-controller-esp32-4mb.bin"}'
+          mkdir -p dist/anonymous-download
+          for asset in firmware.json p1s-heat-controller-esp32-4mb.bin; do
+            curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$P1S_TAG/$asset" \
+              --output "dist/anonymous-download/$asset"
+            cmp "dist/firmware-$P1S_VERSION/$asset" "dist/anonymous-download/$asset"
+          done
+          docker run --rm --env P1S_VERSION --volume "$PWD:/project:ro" --workdir /project \
+            "$IDF_IMAGE" python tools/package_firmware.py --verify-package dist/anonymous-download \
+              --public-key config/ota_signing_public.bin --version "$P1S_VERSION"
+          echo "Published and anonymously verified $P1S_TAG at $P1S_COMMIT" >> "$GITHUB_STEP_SUMMARY"

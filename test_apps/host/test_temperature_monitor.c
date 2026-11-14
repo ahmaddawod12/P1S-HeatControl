@@ -118,8 +118,38 @@ static void test_live_calibration_preserves_fault_and_sample_age(void)
     assert(!sample.valid && sample.fault == HEAT_FAULT_SENSOR_OPEN && isnan(sample.raw_c));
 }
 
+static void test_failed_acquisitions_reset_on_one_success_and_do_not_wrap(void)
+{
+    temperature_monitor_t monitor;
+    temperature_monitor_init(&monitor, 0.0f);
+    temperature_monitor_push(&monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, 0U);
+    assert(temperature_monitor_snapshot(&monitor, 0U).consecutive_failures == 0U);
+    for (unsigned i = 1U; i <= 4U; ++i) {
+        temperature_monitor_push(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_SHORT, i * 1000U);
+        for (unsigned tick = 0; tick < 10U; ++tick) {
+            const temperature_sample_t bad = temperature_monitor_snapshot(&monitor, i * 1000U + tick * 100U);
+            assert(!bad.valid && bad.consecutive_failures == i && bad.consecutive_valid == 0U);
+        }
+    }
+    temperature_monitor_push(&monitor, 26.0f, TEMPERATURE_SENSOR_FAULT_NONE, 5000U);
+    temperature_sample_t good = temperature_monitor_snapshot(&monitor, 5000U);
+    assert(good.valid && good.consecutive_failures == 0U && good.consecutive_valid == 1U);
+    assert_close(26.0f, good.filtered_c, 0.001f);
+    for (unsigned i = 1U; i <= 260U; ++i) {
+        /* NaN is a failed read even if transport reported success. */
+        temperature_monitor_push(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_NONE, 5000U + i * 1000U);
+        const temperature_sample_t bad = temperature_monitor_snapshot(&monitor, 5000U + i * 1000U);
+        assert(bad.consecutive_failures == (i < 5U ? i : 5U));
+        assert(bad.fault == HEAT_FAULT_SENSOR_INVALID);
+    }
+    temperature_monitor_push(&monitor, 27.0f, TEMPERATURE_SENSOR_FAULT_NONE, 266000U);
+    good = temperature_monitor_snapshot(&monitor, 266000U);
+    assert(good.valid && good.consecutive_failures == 0U && good.consecutive_valid == 1U);
+}
+
 int main(void)
 {
+    test_failed_acquisitions_reset_on_one_success_and_do_not_wrap();
     test_live_calibration_rebases_history_and_future_samples();
     test_live_calibration_preserves_fault_and_sample_age();
     test_sample_gap_restarts_streak_and_filter();

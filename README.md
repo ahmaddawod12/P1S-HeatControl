@@ -42,7 +42,8 @@ target starts the fan before the heater within the same control iteration. The
 heater then runs continuously until the target is reached. At the target, the
 heater turns off immediately and the fan continues for 5 seconds before
 turning off. Disabling heating turns the heater off immediately and keeps the
-fan on for 10 seconds. A fault turns both automatic outputs off immediately.
+fan on for 10 seconds. A latched fault stops heating and keeps the fan running
+for 10 seconds when it ends an enabled heating session.
 A dashboard manual-fan request remains an independent override. Neither
 channel is driven active during reset: the pins
 are pulled to their inactive level and the output register is preloaded before
@@ -61,8 +62,10 @@ the driver is enabled.
 | Conversion | Fresh conversion before every CRC-checked reading; driver waits 400 ms |
 | Sensor IC range | −55 to 125 °C |
 | Supplied cable limit | 85 °C maximum |
-| Sample period | 500 ms, including conversion time |
-| Stale after | 2 s |
+| Sample period | 1 s, including conversion time |
+| Controller checks | Every 0.5 s; queued commands can wake it sooner |
+| Sensor fault threshold | 5 consecutive failed reads; any successful read resets the count |
+| Acquisition task stale after | 2 s without a completed read, including failed reads |
 | Samples required before enabling | 3 consecutive valid |
 
 Follow the adapter's printed DATA/VCC/BLK labels; jumper-cable colors and header
@@ -87,11 +90,21 @@ resets to 0 °C. A new DS18B20 calibration then persists normally. Wi-Fi setting
 are stored separately and are unaffected.
 
 The independent controller continues running while the sensor task waits for
-conversion and enforces the two-second freshness timeout even if acquisition
-stalls. A gap over two seconds clears the old filter and valid-sample streak.
-A missing probe, stuck-low DATA, CRC/transport error or invalid
-reading inhibits heating. Reconnect the probe, wait for three clean samples,
-then acknowledge the fault; heating remains disabled until explicitly enabled.
+conversion. Missing presence, stuck-low DATA, CRC/transport errors and invalid
+readings count toward the same five-failure streak. During failures 1–4 the
+heater retains its existing output; invalid temperatures never enter the filter.
+One successful read resets the failure count. Failure 5 latches the sensor fault,
+disables heating and starts a 10-second fan cooldown for an enabled session.
+If the acquisition task stops completing reads, the independent two-second
+stale-task timeout still shuts heating down, including a stall after a bad read.
+A gap over two seconds clears the old filter and valid-sample streak. A new raw
+or filtered reading at or above 82 °C shuts heating down immediately, without
+waiting for five failures. This requires a usable temperature reading; retries
+intentionally retain heating briefly without fresh temperature feedback.
+Reconnect the probe, wait for three clean samples, then acknowledge a latched
+fault; heating remains disabled until explicitly enabled. An enabled heater
+that is already off requires three clean samples and the five-second restart
+interval before regulation can turn it on again.
 See the [DS18B20 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/DS18B20.pdf)
 and [migration design](docs/superpowers/specs/2026-11-01-ds18b20-sensor-design.md).
 
@@ -168,8 +181,10 @@ printer state is known, and turns the heater off by itself when the print ends:
 | Connection lost, or no report for 5 minutes while printing | Held off | Continues; heating returns with the connection |
 | No print starts within 60 minutes of pressing | Off | Ends; heating disabled |
 
+Firmware update requests are rejected while monitoring is active. Stop
+**Monitor P1S** before updating; stopping it keeps manual heating enabled.
 Pressing **Monitor P1S** again stops monitoring and keeps heating. **Disable**,
-a fault, maintenance or a firmware update turn heating off and end monitoring;
+a fault or maintenance turn heating off and end monitoring;
 saving or forgetting printer settings while monitoring ends it and turns
 heating off. Monitoring is never restored after a reboot. While monitoring,
 the heater may only run while the monitor keeps renewing a 5-second permit, so
@@ -232,7 +247,7 @@ enable heating or clear a fault.
 | PUT | `/api/wifi` | Save `{"ssid":"network","password":"password"}` with matching Origin and `X-P1S-CSRF`; returns 202 |
 | GET | `/api/printer` | Redacted connection settings, printer state, reconnect count, monitoring status and CSRF token; no-store |
 | PUT | `/api/printer/config` | Admit printer settings save; 202; preserve an omitted access code only for the same serial |
-| DELETE | `/api/printer/config` | Forget only the printer record; 204 after storage confirms the clear |
+| DELETE | `/api/printer/config` | Admit forgetting only the printer record; 202; `applying`/`config_result` report storage completion |
 | POST | `/api/printer/monitor` | Start Monitor P1S with `{}`; 204, or 409 with the reason when it is not available |
 | POST | `/api/printer/monitor/stop` | Stop monitoring and keep heating; 204 |
 | GET | `/`, `/styles.css`, `/app.js`, `/wifi.js`, `/printer.js` | Dashboard |
@@ -301,6 +316,15 @@ Version **1.0.0** starts the public source release series. Devices running the
 previous development versions, including 1.0.5, need a signed USB installation
 to adopt the reset version, new update repository and active-high relay profile.
 Subsequent newer releases use dashboard OTA normally.
+
+To create a release, bump `version.txt`, add `docs/releases/v<version>.md`, and
+merge into `main`. The **Release firmware** GitHub Actions workflow builds,
+tests, signs and publishes that version. You can also start it from
+**Actions → Release firmware → Run workflow** on `main`. Set up the existing
+signing key as an Actions secret once, as described in the
+[release guide](docs/ota-release-guide.md#release-through-github-actions).
+Ordinary pushes without a version change do not publish a release.
+
 See the [historical implementation status](docs/ota-implementation-status.md)
 for earlier board results and remaining physical commissioning checks.
 

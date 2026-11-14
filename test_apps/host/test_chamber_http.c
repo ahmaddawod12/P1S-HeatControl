@@ -273,7 +273,7 @@ static const struct {
     {"/api/firmware/update",HTTP_POST,"{}","202"},
     {"/api/wifi",HTTP_PUT,"{\"ssid\":\"network\",\"password\":\"password\"}","202"},
     {"/api/printer/config",HTTP_PUT,"{\"enabled\":true,\"ipv4\":\"192.168.1.12\",\"serial\":\"P1S123\",\"access_code\":\"password\"}","202"},
-    {"/api/printer/config",HTTP_DELETE,"{}","204"},
+    {"/api/printer/config",HTTP_DELETE,"{}","202"},
     {"/api/printer/monitor",HTTP_POST,"{}","204"},
     {"/api/printer/monitor/stop",HTTP_POST,"{}","204"},
 };

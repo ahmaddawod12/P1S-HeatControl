@@ -12,13 +12,16 @@ typedef struct {
   uint32_t epoch;
   unsigned type;
 } link_event_t;
-/* Reports from the MQTT task merge here; only the newest state matters, so a
- * burst of reports can never overflow anything or force a reconnect. */
+/* Reports from the MQTT task merge here without a queue. Print history
+ * survives newer states, unreadable reports and reconnects; memory is bounded. */
 typedef struct {
   uint32_t epoch;
   bool have_report, have_state, invalid;
   printer_run_state_t state;
   uint64_t at;
+  bool print_active;
+  uint64_t started_prints, completed_prints;
+  printer_run_state_t last_completed_state;
 } mailbox_t;
 static struct {
   printer_link_ops_t ops;
@@ -61,8 +64,14 @@ static void mailbox_put(uint32_t epoch, const printer_report_t *report,
       xSemaphoreTake(s.mailbox_lock, portMAX_DELAY) != pdTRUE)
     return;
   mailbox_t *m = &s.mailbox;
-  if (m->epoch != epoch)
-    *m = (mailbox_t){.epoch = epoch};
+  if (printer_link_cancelled(epoch)) {
+    xSemaphoreGive(s.mailbox_lock);
+    return;
+  }
+  if (m->epoch != epoch) {
+    m->epoch = epoch;
+    m->have_report = m->have_state = m->invalid = false;
+  }
   if (!report) {
     m->invalid = true;
     m->have_state = false;
@@ -73,6 +82,20 @@ static void mailbox_put(uint32_t epoch, const printer_report_t *report,
       m->have_state = true;
       m->invalid = false;
       m->state = report->state;
+      if (report->state == PRINTER_RUN_PREPARING ||
+          report->state == PRINTER_RUN_RUNNING ||
+          report->state == PRINTER_RUN_PAUSED) {
+        if (!m->print_active)
+          ++m->started_prints;
+        m->print_active = true;
+      } else if (m->print_active &&
+                 (report->state == PRINTER_RUN_FINISHED ||
+                  report->state == PRINTER_RUN_FAILED ||
+                  report->state == PRINTER_RUN_IDLE)) {
+        ++m->completed_prints;
+        m->last_completed_state = report->state;
+        m->print_active = false;
+      }
     }
   }
   xSemaphoreGive(s.mailbox_lock);
@@ -91,7 +114,14 @@ void printer_link_event_report_rejected(uint32_t epoch) {
 }
 static void reset_status(void) {
   const uint32_t reconnects = s.connections > 1 ? s.connections - 1 : 0;
-  s.status = (printer_link_status_t){.reconnects = reconnects};
+  xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
+  s.status = (printer_link_status_t){
+      .reconnects = reconnects,
+      .connection_epoch = s.epoch,
+      .started_prints = s.status.started_prints,
+      .completed_prints = s.status.completed_prints,
+      .last_completed_state = s.status.last_completed_state};
+  xSemaphoreGive(s.mailbox_lock);
 }
 esp_err_t printer_link_start_with_ops(const printer_link_ops_t *ops) {
   if (!ops || !ops->connect || !ops->subscribe || !ops->publish ||
@@ -111,6 +141,7 @@ esp_err_t printer_link_start_with_ops(const printer_link_ops_t *ops) {
   s.backoff = 0;
   s.retry_at = s.last_pushall = 0;
   s.mailbox = (mailbox_t){0};
+  memset(&s.status, 0, sizeof(s.status));
   atomic_store(&suspended, false);
   atomic_store(&resources, false);
   xQueueReset(s.events);
@@ -129,8 +160,12 @@ esp_err_t printer_link_configure(const printer_connection_config_t *config) {
   s.configured = true;
   s.backoff = 0;
   s.retry_at = 0;
-  if (different)
+  if (different) {
     s.pushall_sent = false;
+    xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
+    s.mailbox.print_active = false;
+    xSemaphoreGive(s.mailbox_lock);
+  }
   return ESP_OK;
 }
 void printer_link_suspend(bool value) {
@@ -144,23 +179,28 @@ static void retry(uint64_t now) {
   if (s.backoff < 4)
     ++s.backoff;
 }
-static void take_mailbox(void) {
-  if (xSemaphoreTake(s.mailbox_lock, portMAX_DELAY) != pdTRUE)
+/* Caller holds mailbox_lock. Used by the worker and the live start snapshot. */
+static void merge_mailbox(printer_link_status_t *status, const mailbox_t *m) {
+  status->started_prints = m->started_prints;
+  status->completed_prints = m->completed_prints;
+  status->last_completed_state = m->last_completed_state;
+  if (m->epoch != status->connection_epoch)
     return;
-  mailbox_t m = s.mailbox;
-  s.mailbox = (mailbox_t){.epoch = s.epoch};
-  xSemaphoreGive(s.mailbox_lock);
-  if (m.epoch != s.epoch || !s.connected)
-    return;
-  if (m.invalid) {
-    s.status.state_known = false;
-    s.status.state = PRINTER_RUN_UNKNOWN;
-  } else if (m.have_state) {
-    s.status.state_known = true;
-    s.status.state = m.state;
+  if (m->invalid) {
+    status->state_known = false;
+    status->state = PRINTER_RUN_UNKNOWN;
+  } else if (m->have_state) {
+    status->state_known = m->state != PRINTER_RUN_UNKNOWN;
+    status->state = m->state;
   }
-  if (m.have_report)
-    s.status.received_ms = m.at;
+  if (m->have_report)
+    status->received_ms = m->at;
+}
+static void take_mailbox(void) {
+  xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
+  merge_mailbox(&s.status, &s.mailbox);
+  s.mailbox.have_report = s.mailbox.have_state = s.mailbox.invalid = false;
+  xSemaphoreGive(s.mailbox_lock);
 }
 void printer_link_tick(uint64_t now) {
   if (!s.events)
@@ -204,9 +244,12 @@ void printer_link_tick(uint64_t now) {
     }
   }
   take_mailbox();
+  xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
   s.status.connected =
       s.connected && s.subscribed && !printer_link_cancelled(s.epoch);
-  if (s.status.connected && !s.status.state_known &&
+  const bool needs_recovery = s.status.connected && !s.status.state_known;
+  xSemaphoreGive(s.mailbox_lock);
+  if (needs_recovery &&
       (!s.pushall_sent || now - s.last_pushall >= PRINTER_PUSHALL_MIN_INTERVAL_MS)) {
     char topic[64];
     snprintf(topic, sizeof(topic), "device/%s/request", s.config.serial);
@@ -221,7 +264,15 @@ void printer_link_tick(uint64_t now) {
 void printer_link_get_status(printer_link_status_t *out) {
   if (!out)
     return;
+  memset(out, 0, sizeof(*out));
+  if (!s.mailbox_lock)
+    return;
+  xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
   *out = s.status;
-  if (printer_link_cancelled(s.epoch))
+  /* Include reports received before this snapshot, even before the next tick.
+   * This is the boundary between historical and newly monitored transitions. */
+  merge_mailbox(out, &s.mailbox);
+  xSemaphoreGive(s.mailbox_lock);
+  if (printer_link_cancelled(out->connection_epoch))
     out->connected = false;
 }

@@ -26,6 +26,7 @@ typedef struct {
 esp_err_t printer_control_start(void);
 esp_err_t printer_control_start_with_ops(const printer_control_ops_t *);
 esp_err_t printer_control_request_config(const printer_config_request_t *);
+/* Asynchronous admission; applying/config_result report storage completion. */
 esp_err_t printer_control_forget_config(void);
 /* ESP_ERR_NOT_ALLOWED when not ready (see status reason). */
 esp_err_t printer_control_monitor_start(void);

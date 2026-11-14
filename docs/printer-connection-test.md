@@ -353,3 +353,39 @@ the owner's next manual boot, verify live paused eligibility and a fresh sensor
 reading before exercising the button with heater/fan loads disconnected.
 Physical Resume and the separately reported intermittent download stall remain
 unqualified; successful software tests and upload do not establish those results.
+
+## Firmware review fixes uploaded without reset — 2026-11-08
+
+At the owner's explicit request, the latest reviewed firmware was signed and
+uploaded on COM9 at 115200 baud without a board reset. The initial no-reset
+probe needed a retry; the expected ESP32 was identified before any flash write.
+Settings/boot metadata and the application sectors were backed up first.
+Only the selected `ota_0` application at `0x20000` was written.
+
+The 1,245,172-byte signed image passed native digest verification and complete
+byte-for-byte readback. Its SHA-256 is
+`af3f1e30a68adb30724342bd2f42b5dc84665016ea2c2317571dd5ddb91f42ba`.
+The full boot/settings prefix matched its pre-write backup, including NVS,
+printer/Wi-Fi configuration, partition table and OTA selection. Serial read
+integrity retries recovered through no-reset reconnections.
+
+The connection was closed with the board in RAM flasher/download mode.
+No reset or application-start command was issued; application behavior after
+boot has not been checked. Private backups and the verification record remain
+local under `.superpowers/firmware-review-upload-20261108/`.
+
+## Verified no-reset re-upload to the original board — 2026-11-08
+
+After connection retries and the owner's connection checks, the original
+ESP32 (`7c:d5:44:31:8e:fc`) again responded on COM9. The same signed firmware
+was re-uploaded at 115200 baud to the selected `ota_0` slot at `0x20000`.
+Native digest verification and complete readback passed for all 1,245,172
+bytes, SHA-256
+`af3f1e30a68adb30724342bd2f42b5dc84665016ea2c2317571dd5ddb91f42ba`.
+The settings/boot-metadata prefix matched its fresh pre-write backup.
+No reset or application-start command was issued; the board was left in
+RAM flasher/download mode. Evidence and private backups are under
+`.superpowers/firmware-review-reupload-20261108/`.
+
+A different ESP32 (`48:af:f3:67:35:48`) had briefly answered earlier checks;
+its upload attempts failed during connection and did not write flash.

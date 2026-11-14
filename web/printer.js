@@ -10,7 +10,7 @@
     monitor: document.getElementById('monitor-button'), monitorStatus: document.getElementById('monitor-status')
   };
   var status = null, online = false, fetching = false, timer = null, generation = 0;
-  var dirty = false, saving = false, savePending = null, configUncertain = false;
+  var dirty = false, saving = false, savePending = null, forgetPending = null, configUncertain = false;
   var sending = false, error = '';
   var holds = {
     paused: 'Heater paused: printer is paused.',
@@ -49,7 +49,7 @@
     return endings[m.last_end] || reasons[status.reason] || '';
   }
   function render() {
-    var configuring = saving || !!savePending || !!(status && status.applying);
+    var configuring = saving || !!savePending || !!forgetPending || !!(status && status.applying);
     el.monitor.disabled = !online || !status || !status.csrf_token || sending || (phase() === 'off' && !status.can_monitor);
     el.monitor.setAttribute('aria-pressed', String(phase() !== 'off'));
     text(el.monitorStatus, monitorText());
@@ -57,7 +57,7 @@
     el.forget.disabled = el.save.disabled;
     var message = !status ? 'Reading printer status…' : !online ? 'Controller status is unavailable. Check the printer directly.' : '';
     if (saving) message = 'Saving printer settings…';
-    else if (savePending || (status && status.applying)) message = 'Saving settings and preparing the printer connection…';
+    else if (savePending || forgetPending || (status && status.applying)) message = 'Saving settings and preparing the printer connection…';
     else if (configUncertain) message = 'The settings change was not confirmed. Review the connection before saving again.';
     else if (error) message = error;
     text(el.message, message);
@@ -77,6 +77,7 @@
     if (fetching || document.hidden) return Promise.resolve();
     fetching = true;
     var requestedGeneration = generation;
+    var requestedDuringSave = saving;
     return fetch('/api/printer', {cache: 'no-store'}).then(function (response) {
       if (!response.ok) throw new Error('printer status');
       return response.json();
@@ -94,7 +95,19 @@
         else if (!matches && !configUncertain) error = 'Saved settings changed in another request. Your draft is kept; review the connection.';
         savePending = null;
       }
-      if (!dirty && !saving && !savePending) {
+      /* A poll begun before DELETE settles may still contain the previous
+       * operation's terminal status, even if its reply arrives after DELETE. */
+      if (forgetPending && !requestedDuringSave && !saving && online && !snapshot.applying) {
+        if (snapshot.config_result === 'saved' && !snapshot.configured) {
+          if (sameDraft(forgetPending)) { dirty = false; el.code.value = ''; }
+          configUncertain = false;
+        } else if (snapshot.config_result === 'save_failed') {
+          error = 'Printer settings could not be forgotten. Your draft is kept.';
+          configUncertain = false;
+        } else if (!configUncertain) error = 'Printer settings changed in another request. Your draft is kept.';
+        forgetPending = null;
+      }
+      if (!dirty && !saving && !savePending && !forgetPending) {
         el.address.value = snapshot.ipv4 || ''; el.serial.value = snapshot.serial || '';
         el.enabled.checked = !snapshot.configured || !!snapshot.enabled;
       }
@@ -137,11 +150,12 @@
     if (el.forget.disabled) return;
     var value = draft();
     if (el.code.value) value.access_code = el.code.value;
-    ++generation; saving = true; error = ''; configUncertain = false; render();
-    mutation('/api/printer/config', 'DELETE', {}).then(function () {
-      if (sameDraft(value)) { dirty = false; el.code.value = ''; }
-    }).catch(function (failure) {
-      if (failure.status && failure.status !== 503) error = 'Printer settings could not be forgotten. Another operation may be active.';
+    ++generation; saving = true; forgetPending = value; error = ''; configUncertain = false; render();
+    mutation('/api/printer/config', 'DELETE', {}).catch(function (failure) {
+      if (failure.status && failure.status !== 503) {
+        forgetPending = null;
+        error = 'Printer settings could not be forgotten. Another operation may be active.';
+      }
       else configUncertain = true;
     }).then(function () { saving = false; render(); return refresh(); });
   });

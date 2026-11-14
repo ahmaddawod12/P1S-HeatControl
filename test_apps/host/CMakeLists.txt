@@ -29,15 +29,18 @@ add_executable(test_printer_link test_printer_link.c host_freertos.c printer_stu
     "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link/printer_deadline_transport.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link/printer_link.c"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link/printer_transport.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link/printer_report.c")
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link/printer_report.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_control/printer_monitor.c")
 target_compile_definitions(test_printer_link PRIVATE PRINTER_CA_HOST_TEST=1 HOST_FREERTOS_NO_TIMER=1 HOST_FREERTOS_NO_DELAY=1)
 target_include_directories(test_printer_link PRIVATE printer_stubs stubs
     "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_link/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/printer_control"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/app_types/include")
 target_compile_options(test_printer_link PRIVATE -Wall -Wextra -Werror -pedantic)
 target_link_libraries(test_printer_link PRIVATE pthread m)
-foreach(link_case first_connect known_state reconnect_interval report_without_state malformed burst reconnect_counter disconnect network_ap network_got_ip network_lost_ip)
+foreach(link_case first_connect known_state reconnect_interval report_without_state malformed burst reconnect_counter disconnect network_ap network_got_ip network_lost_ip waiting_burst watching_burst completed_unknown completed_reconnect prior_completion pending_completion unknown_recovery
+    started_disconnect started_unknown started_malformed)
     add_test(NAME printer_link_${link_case} COMMAND test_printer_link ${link_case})
 endforeach()
 
@@ -180,10 +183,12 @@ add_test(NAME temperature_monitor COMMAND test_temperature_monitor)
 add_executable(test_heat_controller
     test_heat_controller.c
     "${CMAKE_CURRENT_LIST_DIR}/../../components/controller/heat_controller.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/temperature/temperature_monitor.c"
 )
 target_include_directories(test_heat_controller PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../../components/app_types/include"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/controller/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/temperature/include"
 )
 target_compile_options(test_heat_controller PRIVATE
     -Wall -Wextra -Werror -pedantic
@@ -286,6 +291,9 @@ target_include_directories(test_runtime_maintenance PRIVATE stubs
 target_compile_options(test_runtime_maintenance PRIVATE -Wall -Wextra -Werror -pedantic)
 target_link_libraries(test_runtime_maintenance PRIVATE pthread m)
 add_test(NAME runtime_maintenance COMMAND test_runtime_maintenance)
+foreach(sensor_case retry_reset retry_stall cadence)
+    add_test(NAME runtime_sensor_${sensor_case} COMMAND test_runtime_maintenance ${sensor_case})
+endforeach()
 foreach(persistence_case disable sensor overtemp stale queue failure maintenance)
     add_test(NAME runtime_persistence_${persistence_case}
         COMMAND test_runtime_maintenance save_${persistence_case})
@@ -298,7 +306,7 @@ foreach(ack_case output sensor stale overtemp recovery expired early_timeout cha
     add_test(NAME runtime_ack_${ack_case} COMMAND test_runtime_maintenance ack_${ack_case})
 endforeach()
 add_test(NAME runtime_diagnostics COMMAND test_runtime_maintenance diagnostics)
-foreach(monitor_case requires permit disable end maintenance)
+foreach(monitor_case requires permit disable disable_enable end maintenance stale_end pending_end)
     add_test(NAME runtime_monitor_${monitor_case}
         COMMAND test_runtime_maintenance monitor_${monitor_case})
 endforeach()
@@ -357,7 +365,8 @@ target_include_directories(test_wifi_manager PRIVATE wifi_stubs stubs
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/include"
 )
 target_compile_options(test_wifi_manager PRIVATE -Wall -Wextra -Werror -pedantic)
-foreach(scenario router association replacement failed_disconnect ip_lost)
+foreach(scenario router association replacement failed_disconnect ip_lost
+    rssi_refresh rssi_rate rssi_failure rssi_ap_deadline rssi_other_network rssi_disconnect_race)
     add_test(NAME wifi_manager_${scenario} COMMAND test_wifi_manager ${scenario})
 endforeach()
 

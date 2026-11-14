@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "heat_controller.h"
+#include "temperature_monitor.h"
 
 static temperature_sample_t sample(float raw_c,
                                    float filtered_c,
@@ -335,8 +336,163 @@ static void test_disable_while_inhibited(void)
     assert(!heat_controller_snapshot(&controller).output_on);
 }
 
+static temperature_sample_t acquire(temperature_monitor_t *monitor, float value,
+                                    temperature_sensor_fault_t fault, uint64_t time)
+{
+    temperature_monitor_push(monitor, value, fault, time);
+    return temperature_monitor_snapshot(monitor, time);
+}
+
+static heat_controller_t start_with_monitor(temperature_monitor_t *monitor)
+{
+    temperature_monitor_init(monitor, 0.0f);
+    temperature_sample_t reading = {0};
+    for (unsigned i = 0; i < 3U; ++i) {
+        reading = acquire(monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, i * 1000U);
+    }
+    heat_controller_t controller = ready_controller();
+    assert(heat_controller_command(&controller, &k_enable, &reading, 2000U));
+    return controller;
+}
+
+static void test_five_failed_acquisitions_latch_even_with_mixed_errors(void)
+{
+    temperature_monitor_t monitor;
+    heat_controller_t controller = start_with_monitor(&monitor);
+    const temperature_sensor_fault_t faults[] = {
+        TEMPERATURE_SENSOR_FAULT_SHORT, TEMPERATURE_SENSOR_FAULT_OPEN,
+        TEMPERATURE_SENSOR_FAULT_IO, TEMPERATURE_SENSOR_FAULT_RANGE,
+        TEMPERATURE_SENSOR_FAULT_SHORT,
+    };
+    for (unsigned i = 0; i < 5U; ++i) {
+        const uint64_t time = 3000U + i * 1000U;
+        const temperature_sample_t reading = acquire(&monitor, NAN, faults[i], time);
+        assert(!reading.valid);
+        /* Repeated 100 ms control ticks see one acquisition, not new failures. */
+        for (unsigned tick = 0; tick < 10U; ++tick) {
+            heat_controller_step(&controller, &reading, time + tick * 100U);
+            const heat_controller_snapshot_t status = heat_controller_snapshot(&controller);
+            if (i < 4U) {
+                assert(status.enabled && status.output_on);
+                assert(status.state == HEAT_STATE_HEATING && status.fault == HEAT_FAULT_NONE);
+            } else {
+                assert(!status.enabled && !status.output_on);
+                assert(status.state == HEAT_STATE_FAULT && status.fault == HEAT_FAULT_SENSOR_SHORT);
+            }
+        }
+    }
+    const temperature_sample_t good = acquire(&monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, 8000U);
+    heat_controller_step(&controller, &good, 8000U);
+    assert(heat_controller_snapshot(&controller).state == HEAT_STATE_FAULT);
+}
+
+static void test_one_success_resets_all_previous_failures(void)
+{
+    temperature_monitor_t monitor;
+    heat_controller_t controller = start_with_monitor(&monitor);
+    for (unsigned sequence = 0; sequence < 2U; ++sequence) {
+        for (unsigned i = 0; i < 4U; ++i) {
+            const uint64_t time = 3000U + sequence * 5000U + i * 1000U;
+            const temperature_sample_t bad = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_SHORT, time);
+            heat_controller_step(&controller, &bad, time);
+            assert(heat_controller_snapshot(&controller).output_on);
+            assert(heat_controller_snapshot(&controller).fault == HEAT_FAULT_NONE);
+        }
+        if (sequence == 0U) {
+            const temperature_sample_t good = acquire(&monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, 7000U);
+            assert(good.valid && good.consecutive_valid == 1U);
+            heat_controller_step(&controller, &good, 7000U);
+            assert(heat_controller_snapshot(&controller).output_on);
+        }
+    }
+    const temperature_sample_t fifth = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_SHORT, 12000U);
+    heat_controller_step(&controller, &fifth, 12000U);
+    assert(heat_controller_snapshot(&controller).state == HEAT_STATE_FAULT);
+}
+
+static void test_startup_retries_cannot_enable_heating(void)
+{
+    temperature_monitor_t monitor;
+    temperature_monitor_init(&monitor, 0.0f);
+    heat_controller_t controller = ready_controller();
+    for (unsigned i = 0; i < 5U; ++i) {
+        const temperature_sample_t bad = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_OPEN, i * 1000U);
+        heat_controller_step(&controller, &bad, i * 1000U);
+        assert(!heat_controller_snapshot(&controller).output_on);
+        assert(!heat_controller_command(&controller, &k_enable, &bad, i * 1000U));
+        assert(heat_controller_snapshot(&controller).state ==
+               (i < 4U ? HEAT_STATE_IDLE : HEAT_STATE_FAULT));
+    }
+}
+
+static void test_hot_success_after_retries_still_trips_immediately(void)
+{
+    temperature_monitor_t monitor;
+    heat_controller_t controller = start_with_monitor(&monitor);
+    for (unsigned i = 0; i < 4U; ++i) {
+        const temperature_sample_t bad = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_IO, 3000U + i * 1000U);
+        heat_controller_step(&controller, &bad, 3000U + i * 1000U);
+    }
+    const temperature_sample_t hot = acquire(&monitor, 82.0f, TEMPERATURE_SENSOR_FAULT_NONE, 7000U);
+    heat_controller_step(&controller, &hot, 7000U);
+    const heat_controller_snapshot_t status = heat_controller_snapshot(&controller);
+    assert(status.state == HEAT_STATE_FAULT && status.fault == HEAT_FAULT_OVERTEMP);
+    assert(!status.enabled && !status.output_on);
+}
+
+static void test_restart_after_retries_requires_three_good_reads(void)
+{
+    temperature_monitor_t monitor;
+    heat_controller_t controller = start_with_monitor(&monitor);
+    heat_controller_set_inhibit(&controller, true, 3000U);
+    const temperature_sample_t bad = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_IO, 3000U);
+    heat_controller_step(&controller, &bad, 3000U);
+    heat_controller_set_inhibit(&controller, false, 3500U);
+    /* Keep acquisition fresh until after the 5000 ms restart delay. */
+    for (unsigned i = 0; i < 3U; ++i) {
+        const temperature_sample_t good = acquire(&monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, 4000U + i * 1000U);
+        heat_controller_step(&controller, &good, 4000U + i * 1000U);
+        assert(!heat_controller_snapshot(&controller).output_on);
+    }
+    const temperature_sample_t retry = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_IO, 7000U);
+    heat_controller_step(&controller, &retry, 7000U);
+    for (unsigned i = 0; i < 3U; ++i) {
+        const temperature_sample_t good = acquire(&monitor, 25.0f, TEMPERATURE_SENSOR_FAULT_NONE, 8000U + i * 1000U);
+        heat_controller_step(&controller, &good, 8000U + i * 1000U);
+        const heat_controller_snapshot_t status = heat_controller_snapshot(&controller);
+        assert(status.enabled && status.fault == HEAT_FAULT_NONE);
+        assert(status.output_on == (i == 2U));
+    }
+}
+
+static void test_disable_and_staleness_bypass_retry_allowance(void)
+{
+    temperature_monitor_t monitor;
+    heat_controller_t controller = start_with_monitor(&monitor);
+    temperature_sample_t bad = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_SHORT, 3000U);
+    heat_controller_step(&controller, &bad, 3000U);
+    const heat_controller_command_t disable = {.kind = HEAT_COMMAND_DISABLE};
+    assert(heat_controller_command(&controller, &disable, &bad, 3100U));
+    assert(!heat_controller_snapshot(&controller).enabled && !heat_controller_snapshot(&controller).output_on);
+
+    controller = start_with_monitor(&monitor);
+    bad = acquire(&monitor, NAN, TEMPERATURE_SENSOR_FAULT_SHORT, 3000U);
+    heat_controller_step(&controller, &bad, 3000U);
+    bad = temperature_monitor_snapshot(&monitor, 5001U);
+    heat_controller_step(&controller, &bad, 5001U);
+    const heat_controller_snapshot_t status = heat_controller_snapshot(&controller);
+    assert(status.state == HEAT_STATE_FAULT && status.fault == HEAT_FAULT_SENSOR_STALE);
+    assert(!status.output_on);
+}
+
 int main(void)
 {
+    test_five_failed_acquisitions_latch_even_with_mixed_errors();
+    test_one_success_resets_all_previous_failures();
+    test_startup_retries_cannot_enable_heating();
+    test_hot_success_after_retries_still_trips_immediately();
+    test_restart_after_retries_requires_three_good_reads();
+    test_disable_and_staleness_bypass_retry_allowance();
     test_inhibit_holds_output_off();
     test_inhibit_release_waits_min_transition();
     test_enable_while_inhibited_stays_off();

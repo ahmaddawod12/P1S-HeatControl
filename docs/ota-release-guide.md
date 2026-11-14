@@ -65,7 +65,62 @@ the personal bootstrap's local health checks. Until that record exists, the
 bootstrap stays in maintenance regardless of the SDK slot state. Later boots
 with that record can leave maintenance without needing the router.
 
-## Prepare a generic public release
+## Release through GitHub Actions
+
+The **Release firmware** workflow supports two entry points:
+
+- Merge a change to `version.txt` into `main` to start a release automatically.
+  Ordinary commits to `main` do not publish firmware.
+- Open **Actions → Release firmware → Run workflow**, select **main**, and run
+  it manually. This also retries a failed run using the version already in source.
+
+Before the first cloud release, add a repository Actions secret named
+`OTA_SIGNING_PRIVATE_KEY` in **Settings → Secrets and variables → Actions**.
+Its value is the existing ECDSA private key's complete PEM text, including the
+BEGIN/END lines. It must match `config/ota_signing_public.bin`; generating a new
+key would break trust with installed controllers. GitHub documents
+[secret setup](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
+and [manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
+No separate publication token is needed: the publishing job uses `GITHUB_TOKEN`.
+
+For example, to release `1.0.1`:
+
+1. Set `version.txt` to `1.0.1` and write `docs/releases/v1.0.1.md` with the
+   changes and any commissioning limitations.
+2. Commit those files with the intended firmware changes and merge into `main`.
+3. Watch **Actions → Release firmware**. The workflow runs the Windows host,
+   dashboard and local-publisher tests, builds the generic ESP-IDF 6.1 firmware
+   and Unity test image, runs the Python tool tests and compiled stack check,
+   signs and validates the package, and publishes `v1.0.1` at the tested commit.
+4. The final job checks GitHub's latest stable release and anonymously downloads
+   and validates both public assets. The dashboard can then install the release
+   through **Update firmware**.
+
+Both triggers read `version.txt`; there is no separate version input that could
+disagree with the compiled image. New versions must be stable `major.minor.patch`,
+newer than every existing stable tag, and have nonempty committed release notes.
+The checkout must match the workflow commit and remain clean. Only upstream
+`main` can run the release jobs; forks and other branches cannot publish.
+
+An existing version tag makes the run a successful no-op. The workflow never
+replaces a tag or release. If a build or signing check fails, fix the problem and
+run the workflow on `main` again. If publication fails after reserving a tag,
+inspect that tag/release before recovery; a retry will not replace it. A failed
+public-download check can occur after publication, so inspect the existing
+release before deciding to issue another version.
+
+The signing job writes the secret only to a temporary runner file, mounts it
+read-only during signing, and removes it afterward. Its artifact and the release
+contain exactly the signed application and `firmware.json`. Only the final job
+has repository write permission. Personal configurations, USB setup images and
+backups are not used by this workflow. Release runs on `main` are serialized;
+a manual run on another branch cannot displace them. GitHub keeps one running
+and the newest pending run per branch, so superseded pending versions are not
+published when several version bumps arrive during a build.
+
+## Prepare a generic public release locally
+
+The local process remains available when signing from the owner's PC is preferred.
 
 Increase `version.txt` using stable `major.minor.patch` versions. Keep the board,
 layout, relay polarity and trust key compatible. Use separate build/config
@@ -129,7 +184,9 @@ not enabled.
 
 ## Dashboard behavior and recovery
 
-Press **Update firmware** once. A local worker checks the newest stable release
+Stop **Monitor P1S** before updating; update requests are rejected while it is
+active so preflight cannot interrupt monitored heating. Stopping monitoring
+keeps manual heating enabled. Press **Update firmware** once. A local worker checks the newest stable release
 without changing heating during an unsuccessful preflight. An equal/older
 release reports up to date. A newer compatible release starts maintenance,
 disables heating/manual fan, observes the normal fan cooldown, then streams to

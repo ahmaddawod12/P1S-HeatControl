@@ -335,7 +335,7 @@ TEST_CASE("reaching target starts fan cooldown", "[runtime]")
     WAIT_FOR(state_is(HEAT_STATE_HEATING), 2000);
 
     fake_set_sensor(60.0f, TEMPERATURE_SENSOR_FAULT_NONE);
-    WAIT_FOR(state_is(HEAT_STATE_HOLDING), 2000);
+    WAIT_FOR(state_is(HEAT_STATE_HOLDING), 4500);
 
     const app_status_t status = status_now();
     TEST_ASSERT_TRUE(status.enabled);
@@ -385,22 +385,29 @@ TEST_CASE("target zero stops heater and keeps fan on for cooldown", "[runtime]")
     app_runtime_stop();
 }
 
-TEST_CASE("a sensor fault stops heater and fan immediately", "[runtime]")
+TEST_CASE("five failed sensor reads stop heating and keep fan cooling", "[runtime]")
 {
     start_ready_runtime(50.0f);
     TEST_ESP_OK(app_runtime_set_enabled(true));
     WAIT_FOR(state_is(HEAT_STATE_HEATING), 2000);
 
     fake_set_sensor(50.0f, TEMPERATURE_SENSOR_FAULT_OPEN);
-    WAIT_FOR(state_is(HEAT_STATE_FAULT), 3000);
+    for (unsigned failures = 1U; failures <= 4U; ++failures) {
+        WAIT_FOR(status_now().temperature.consecutive_failures == failures, 2000);
+        TEST_ASSERT_EQUAL_INT(HEAT_FAULT_NONE, status_now().fault);
+        TEST_ASSERT_TRUE(fake_heater_on());
+        TEST_ASSERT_TRUE(fake_fan_on());
+    }
+    WAIT_FOR(state_is(HEAT_STATE_FAULT), 2000);
 
     const app_status_t status = status_now();
     TEST_ASSERT_EQUAL(HEAT_FAULT_SENSOR_OPEN, status.fault);
     TEST_ASSERT_FALSE(status.enabled);
     TEST_ASSERT_FALSE(status.heater_on);
-    TEST_ASSERT_FALSE(status.fan_on);
+    TEST_ASSERT_EQUAL_UINT8(5U, status.temperature.consecutive_failures);
+    TEST_ASSERT_TRUE(status.fan_on);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
+    TEST_ASSERT_TRUE(fake_fan_on());
     TEST_ASSERT_EQUAL_INT(3, fake_output_calls());
 
     app_runtime_stop();

@@ -102,15 +102,18 @@ DATA to GND for step 4.4; do not short the 3.3 V supply.
 
 | # | Check | Expected | Result | Date / initials |
 |---|---|---|---|---|
-| 4.1 | Disconnect the probe DATA lead | State `fault`, fault `sensor_open` | | |
-| 4.2 | Outputs during 4.1 | Both off | | |
+| 4.1 | Disconnect the probe DATA lead while heating | First four 1-second failed reads retain heater output; fifth latches `sensor_open` | | |
+| 4.2 | Outputs after 4.1 latches | Heater off; fan on for 10 s, then off | | |
 | 4.3 | Reconnect lead, acknowledge | Refused until three clean samples, then `idle` | | |
-| 4.4 | Short GPIO27 DATA to GND | State `fault`, fault `sensor_short` | | |
-| 4.5 | Outputs during 4.4 | Both off | | |
+| 4.4 | Short GPIO27 DATA to GND while heating | First four failed reads retain output; fifth latches `sensor_short` | | |
+| 4.5 | Outputs after 4.4 latches | Heater off; fan on for 10 s, then off | | |
 | 4.6 | Restore, acknowledge | Returns to `idle`, still disabled | | |
 | 4.7 | Enable attempt while faulted | Refused with HTTP 409 | | |
-| 4.8 | Boot with the probe disconnected | Dashboard available; `sensor_open`; heating disabled | | |
+| 4.8 | Boot with the probe disconnected | Dashboard available; fifth failed read latches `sensor_open`; heater and fan remain off | | |
 | 4.9 | Reconnect after 4.8, wait for three clean samples and acknowledge | Returns to `idle`; remains disabled | | |
+| 4.10 | Inject four failed reads, then one successful read, then four failures | Failure streak resets on success; heating continues without a latched fault | | |
+| 4.11 | Fault kind alternates with no successful read | Fifth failed read still latches the current sensor fault | | |
+| 4.12 | Stop acquisition after one failed read | Stale-task fault still stops heating after 2 s without a completed read | | |
 
 ## Stage 5 — Fan-only relay test
 

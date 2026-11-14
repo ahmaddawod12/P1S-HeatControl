@@ -8,6 +8,11 @@ static bool active(printer_run_state_t s) {
 static bool known(const printer_link_status_t *link) {
   return link->state_known && link->state != PRINTER_RUN_UNKNOWN;
 }
+static printer_monitor_end_t end_reason(printer_run_state_t state) {
+  return state == PRINTER_RUN_FINISHED ? PRINTER_MONITOR_END_FINISHED
+       : state == PRINTER_RUN_FAILED ? PRINTER_MONITOR_END_FAILED
+                                    : PRINTER_MONITOR_END_IDLE;
+}
 void printer_monitor_init(printer_monitor_status_t *m) {
   memset(m, 0, sizeof(*m));
 }
@@ -23,6 +28,8 @@ bool printer_monitor_start(printer_monitor_status_t *m,
                                               : PRINTER_HOLD_NONE;
   m->last_end = PRINTER_MONITOR_END_NONE;
   m->started_ms = now_ms;
+  m->started_prints_at_start = link->started_prints;
+  m->completed_prints_at_start = link->completed_prints;
   return true;
 }
 void printer_monitor_stop(printer_monitor_status_t *m,
@@ -35,6 +42,17 @@ void printer_monitor_step(printer_monitor_status_t *m,
                           const printer_link_status_t *link, uint64_t now_ms) {
   if (!m || !link || m->phase == PRINTER_MONITOR_OFF)
     return;
+  /* A completed print can be hidden by a later state in the same report burst.
+   * Only completions after this session's baseline may end monitoring. */
+  if (link->completed_prints != m->completed_prints_at_start) {
+    printer_monitor_stop(m, end_reason(link->last_completed_state));
+    return;
+  }
+  /* A start hidden by an unreadable report or reconnect still cancels the
+   * no-print timeout; the current link state continues to govern the hold. */
+  if (m->phase == PRINTER_MONITOR_WAITING &&
+      link->started_prints != m->started_prints_at_start)
+    m->phase = PRINTER_MONITOR_WATCHING;
   const printer_run_state_t s = link->state;
   if (!link->connected) {
     m->hold = PRINTER_HOLD_DISCONNECTED;
@@ -49,9 +67,7 @@ void printer_monitor_step(printer_monitor_status_t *m,
     m->phase = PRINTER_MONITOR_WATCHING;
     m->hold = s == PRINTER_RUN_PAUSED ? PRINTER_HOLD_PAUSED : PRINTER_HOLD_NONE;
   } else if (m->phase == PRINTER_MONITOR_WATCHING) {
-    printer_monitor_stop(m, s == PRINTER_RUN_FINISHED ? PRINTER_MONITOR_END_FINISHED
-                            : s == PRINTER_RUN_FAILED ? PRINTER_MONITOR_END_FAILED
-                                                      : PRINTER_MONITOR_END_IDLE);
+    printer_monitor_stop(m, end_reason(s));
     return;
   } else {
     m->hold = PRINTER_HOLD_NONE;

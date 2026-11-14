@@ -13,10 +13,9 @@ static struct {
   printer_connection_config_t config, pending;
   printer_control_status_t status;
   printer_monitor_status_t monitor;
-  SemaphoreHandle_t lock, completion;
+  SemaphoreHandle_t lock;
   TaskHandle_t task;
   unsigned command;
-  esp_err_t completion_result;
   bool configured;
 } s;
 static atomic_bool started;
@@ -83,9 +82,7 @@ esp_err_t printer_control_start_with_ops(const printer_control_ops_t *ops) {
 #endif
   if (!s.lock)
     s.lock = xSemaphoreCreateMutex();
-  if (!s.completion)
-    s.completion = xSemaphoreCreateBinary();
-  if (!s.lock || !s.completion)
+  if (!s.lock)
     return ESP_ERR_NO_MEM;
   s.ops = *ops;
   memset(&s.status, 0, sizeof(s.status));
@@ -114,8 +111,17 @@ esp_err_t printer_control_start_with_ops(const printer_control_ops_t *ops) {
 esp_err_t printer_control_monitor_start(void) {
   if (!atomic_load(&started))
     return ESP_ERR_INVALID_STATE;
-  if (!lock())
+  /* Only admission is serialized: monitoring itself never owns the service
+   * gate. OTA can check runtime activity without racing a new monitor start. */
+  if (!s.ops.gate_begin(SERVICE_OPERATION_PRINTER_MONITOR, s.ops.ctx))
+    return ESP_ERR_NOT_ALLOWED;
+  if (!lock()) {
+    s.ops.gate_end(SERVICE_OPERATION_PRINTER_MONITOR, s.ops.ctx);
     return ESP_ERR_TIMEOUT;
+  }
+  /* Establish the session baseline from reports already received at the press,
+   * including those not yet consumed by the worker. */
+  s.ops.link_status(&s.status.link, s.ops.ctx);
   app_status_t heat;
   s.ops.heat_snapshot(&heat, s.ops.ctx);
   const uint64_t now = s.ops.now_ms(s.ops.ctx);
@@ -129,6 +135,7 @@ esp_err_t printer_control_monitor_start(void) {
   }
   publish(&heat, now);
   unlock();
+  s.ops.gate_end(SERVICE_OPERATION_PRINTER_MONITOR, s.ops.ctx);
   return result;
 }
 esp_err_t printer_control_monitor_stop(void) {
@@ -171,7 +178,6 @@ static esp_err_t config_admit(const printer_config_request_t *request,
   if (s.command)
     result = ESP_ERR_NOT_ALLOWED;
   if (result == ESP_OK) {
-    (void)xSemaphoreTake(s.completion, 0);
     s.pending = candidate;
     s.command = forget ? 2 : 1;
     s.status.applying = true;
@@ -188,15 +194,7 @@ printer_control_request_config(const printer_config_request_t *request) {
   return config_admit(request, false);
 }
 esp_err_t printer_control_forget_config(void) {
-  esp_err_t result = config_admit(NULL, true);
-  if (result != ESP_OK)
-    return result;
-#ifdef PRINTER_CONTROL_MANUAL_POLL
-  printer_control_poll();
-#endif
-  if (xSemaphoreTake(s.completion, pdMS_TO_TICKS(100)) != pdTRUE)
-    return ESP_ERR_TIMEOUT;
-  return s.completion_result;
+  return config_admit(NULL, true);
 }
 void printer_control_poll(void) {
   if (!atomic_load(&started))
@@ -229,18 +227,17 @@ void printer_control_poll(void) {
       s.status.applying = false;
       strcpy(s.status.config_result,
              result == ESP_OK ? "saved" : "save_failed");
-      s.completion_result = result;
       unlock();
     }
     s.ops.gate_end(SERVICE_OPERATION_PRINTER_CONFIG, s.ops.ctx);
-    if (command == 2)
-      xSemaphoreGive(s.completion);
   }
   s.ops.link_tick(s.ops.now_ms(s.ops.ctx), s.ops.ctx);
   printer_link_status_t link;
-  s.ops.link_status(&link, s.ops.ctx);
   if (!lock())
     return;
+  /* Serialize this snapshot with start so an older poll cannot precede a newer
+   * session baseline and then be applied to that session. */
+  s.ops.link_status(&link, s.ops.ctx);
   const uint64_t now = s.ops.now_ms(s.ops.ctx);
   app_status_t heat;
   s.ops.heat_snapshot(&heat, s.ops.ctx);

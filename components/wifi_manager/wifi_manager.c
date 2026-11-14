@@ -20,6 +20,7 @@
 
 #define WORKER_STACK 4096
 #define RESPONSE_GRACE_MS 250U
+#define RSSI_REFRESH_MS 5000U
 static const char *TAG="wifi";
 static bool s_stack_ready, s_mdns_ready, s_storage_ready;
 static esp_netif_t *s_sta_netif;
@@ -29,6 +30,7 @@ static wifi_engine_t s_engine;
 static wifi_manager_status_t s_status;
 static bool s_pending;
 static uint64_t s_apply_at;
+static uint64_t s_rssi_refresh_at;
 static wifi_credentials_t s_requested;
 typedef struct {
     bool pending, connected;
@@ -165,6 +167,26 @@ static void publish(void)
         app_runtime_set_network_status(status.rssi,status.ip_addr);
     }
 }
+static void refresh_rssi(uint64_t now)
+{
+    if (!s_engine.status.connected || now<s_rssi_refresh_at) return;
+    /* Bound failed queries too; RSSI is advisory and must not drive recovery. */
+    s_rssi_refresh_at=now+RSSI_REFRESH_MS;
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    const unsigned epoch=atomic_load(&s_disconnect_epoch);
+    const bool pending=s_event.pending;
+    xSemaphoreGive(s_lock);
+    if (pending) return;
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap)!=ESP_OK) return;
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    /* A new association/IP event or a disconnect invalidates this sample.
+     * Never route a signal update through connected(): it renews AP grace. */
+    if (!s_event.pending && epoch==atomic_load(&s_disconnect_epoch) &&
+        strncmp((const char *)ap.ssid,s_engine.status.ssid,sizeof(ap.ssid))==0)
+        s_engine.status.rssi=ap.rssi;
+    xSemaphoreGive(s_lock);
+}
 static void worker(void *arg)
 {
     (void)arg;
@@ -178,7 +200,11 @@ static void worker(void *arg)
         if (apply) { requested=s_requested; s_pending=false; }
         xSemaphoreGive(s_lock);
         if (event.pending) {
-            if (event.connected) wifi_engine_connected(&s_engine,event.ssid,event.ip,event.rssi,now);
+            if (event.connected) {
+                wifi_engine_connected(&s_engine,event.ssid,event.ip,event.rssi,now);
+                if (s_engine.status.connected && strcmp(event.ssid,s_engine.status.ssid)==0)
+                    s_rssi_refresh_at=now+RSSI_REFRESH_MS;
+            }
             else wifi_engine_disconnected(&s_engine,event.result,now);
         }
         if (apply) {
@@ -186,6 +212,7 @@ static void worker(void *arg)
             service_operation_end(SERVICE_OPERATION_WIFI);
         }
         wifi_engine_tick(&s_engine,now,service_operation_current()==SERVICE_OPERATION_NONE,&ops);
+        refresh_rssi(now);
         publish();
         (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(100));
     }

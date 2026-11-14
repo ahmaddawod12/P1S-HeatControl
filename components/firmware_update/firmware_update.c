@@ -77,6 +77,12 @@ esp_err_t firmware_update_request(void)
     if (!s_task) return ESP_ERR_INVALID_STATE;
     if (firmware_trial_pending() || app_runtime_maintenance_active()) return ESP_ERR_NOT_ALLOWED;
     if (!service_operation_begin(SERVICE_OPERATION_OTA)) return ESP_ERR_NOT_ALLOWED;
+    /* Holding admission prevents a monitor from starting between this check
+     * and the worker releasing the printer's TLS resources. */
+    if (app_runtime_monitor_active()) {
+        service_operation_end(SERVICE_OPERATION_OTA);
+        return ESP_ERR_NOT_ALLOWED;
+    }
     bool expected = false;
     if (!atomic_compare_exchange_strong(&s_busy, &expected, true)) {
         service_operation_end(SERVICE_OPERATION_OTA);

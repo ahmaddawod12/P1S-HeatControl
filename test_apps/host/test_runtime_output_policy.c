@@ -86,7 +86,7 @@ static void test_disable_from_holding_starts_ten_second_fan_cooldown(void)
     assert(!request.fan_on);
 }
 
-static void test_fault_does_not_start_fan_cooldown(void)
+static void test_fault_starts_ten_second_fan_cooldown_once(void)
 {
     runtime_output_policy_t policy;
     runtime_output_policy_init(&policy);
@@ -97,8 +97,47 @@ static void test_fault_does_not_start_fan_cooldown(void)
 
     status = snapshot(HEAT_STATE_FAULT, false, false);
     status.fault = HEAT_FAULT_SENSOR_OPEN;
-    const runtime_output_request_t request =
+    runtime_output_request_t request =
         runtime_output_policy_step(&policy, &status, true, false, 1000U);
+    assert(!request.heater_on);
+    assert(request.fan_on);
+
+    /* A failed output write can leave the previous heater state reported on.
+     * Repeated fault ticks must still retain the original cooldown deadline. */
+    request = runtime_output_policy_step(&policy, &status, true, false, 2000U);
+    assert(!request.heater_on && request.fan_on);
+    request = runtime_output_policy_step(&policy, &status, false, false, 10999U);
+    assert(request.fan_on);
+    request = runtime_output_policy_step(&policy, &status, false, false, 11000U);
+    assert(!request.fan_on);
+}
+
+static void test_fault_from_holding_keeps_fan_on_and_ack_preserves_deadline(void)
+{
+    runtime_output_policy_t policy;
+    runtime_output_policy_init(&policy);
+    heat_controller_snapshot_t status = snapshot(HEAT_STATE_HOLDING, true, false);
+    (void) runtime_output_policy_step(&policy, &status, false, false, 0U);
+    status = snapshot(HEAT_STATE_FAULT, false, false);
+    status.fault = HEAT_FAULT_SENSOR_SHORT;
+    runtime_output_request_t request = runtime_output_policy_step(&policy, &status, false, false, 1000U);
+    assert(!request.heater_on && request.fan_on);
+    status = snapshot(HEAT_STATE_IDLE, false, false);
+    request = runtime_output_policy_step(&policy, &status, false, false, 3000U);
+    assert(!request.heater_on && request.fan_on);
+    request = runtime_output_policy_step(&policy, &status, false, false, 10999U);
+    assert(request.fan_on);
+    request = runtime_output_policy_step(&policy, &status, false, false, 11000U);
+    assert(!request.fan_on);
+}
+
+static void test_inactive_startup_fault_does_not_start_fan(void)
+{
+    runtime_output_policy_t policy;
+    runtime_output_policy_init(&policy);
+    heat_controller_snapshot_t status = snapshot(HEAT_STATE_FAULT, false, false);
+    status.fault = HEAT_FAULT_OUTPUT_INIT;
+    const runtime_output_request_t request = runtime_output_policy_step(&policy, &status, false, false, 1000U);
     assert(!request.heater_on);
     assert(!request.fan_on);
 }
@@ -138,7 +177,9 @@ int main(void)
     test_target_reached_starts_five_second_fan_cooldown();
     test_disable_starts_ten_second_fan_cooldown();
     test_disable_from_holding_starts_ten_second_fan_cooldown();
-    test_fault_does_not_start_fan_cooldown();
+    test_fault_starts_ten_second_fan_cooldown_once();
+    test_fault_from_holding_keeps_fan_on_and_ack_preserves_deadline();
+    test_inactive_startup_fault_does_not_start_fan();
     test_manual_fan_remains_an_independent_override();
     test_maintenance_blocks_heat_and_manual_fan();
     puts("runtime_output_policy: PASS");

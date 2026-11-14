@@ -14,12 +14,14 @@ static bool runtime_active, last_end_disable, stored_present;
 static unsigned begins, permits, ends, saves;
 static uint64_t last_permit;
 static esp_err_t begin_result;
+static esp_err_t clear_result;
 static service_operation_t owner;
 static printer_connection_config_t stored;
 
 static void heat_snapshot(app_status_t *out, void *c) { (void)c; *out = heat; }
 static esp_err_t monitor_begin(uint64_t until, void *c) {
   (void)c;
+  assert(owner == SERVICE_OPERATION_PRINTER_MONITOR);
   ++begins;
   last_permit = until;
   if (begin_result == ESP_OK)
@@ -63,7 +65,11 @@ static esp_err_t save(const printer_connection_config_t *v, void *c) {
   stored_present = true;
   return ESP_OK;
 }
-static esp_err_t clear(void *c) { (void)c; stored_present = false; return ESP_OK; }
+static esp_err_t clear(void *c) {
+  (void)c;
+  if (clear_result == ESP_OK) stored_present = false;
+  return clear_result;
+}
 static bool gate_begin(service_operation_t op, void *c) {
   (void)c;
   if (owner != SERVICE_OPERATION_NONE)
@@ -107,6 +113,7 @@ static void reset(void) {
   begins = permits = ends = saves = 0;
   last_permit = 0;
   begin_result = ESP_OK;
+  clear_result = ESP_OK;
   owner = SERVICE_OPERATION_NONE;
   stored = (printer_connection_config_t){.enabled = true, .ipv4 = "192.168.1.20",
                                          .serial = "SERIAL123",
@@ -189,6 +196,18 @@ static void control_start_paused_begins_held(void) {
   assert(begins == 1 && last_permit == 0);
   assert(status_now().monitor.hold == PRINTER_HOLD_PAUSED);
 }
+static void control_start_refreshes_completion_baseline(void) {
+  reset();
+  /* A print ended after the last coordinator poll but before the button. */
+  link_state.state = PRINTER_RUN_FINISHED;
+  link_state.completed_prints = 1;
+  link_state.last_completed_state = PRINTER_RUN_FINISHED;
+  assert(printer_control_monitor_start() == ESP_OK);
+  assert(status_now().monitor.phase == PRINTER_MONITOR_WAITING);
+  printer_control_poll();
+  assert(status_now().monitor.phase == PRINTER_MONITOR_WAITING);
+  assert(ends == 0 && heat.enabled);
+}
 static void control_leftover_finish_sequence(void) {
   reset();
   poll_at(PRINTER_RUN_FINISHED, 1000);
@@ -259,11 +278,49 @@ static void control_wait_remaining(void) {
   assert(status_now().monitor.last_end == PRINTER_MONITOR_END_NO_PRINT);
 }
 
+static void control_forget_reports_async_completion(void) {
+  reset();
+  assert(printer_control_monitor_start() == ESP_OK);
+  assert(printer_control_forget_config() == ESP_OK);
+  assert(stored_present && status_now().configured && status_now().applying);
+  assert(runtime_active && owner == SERVICE_OPERATION_PRINTER_CONFIG);
+  printer_control_poll();
+  assert(!stored_present && !status_now().configured && !status_now().applying);
+  assert(!strcmp(status_now().config_result, "saved"));
+  assert(!runtime_active && !heat.enabled && owner == SERVICE_OPERATION_NONE);
+
+  reset();
+  clear_result = ESP_FAIL;
+  assert(printer_control_forget_config() == ESP_OK);
+  assert(status_now().applying);
+  printer_control_poll();
+  assert(stored_present && status_now().configured && !status_now().applying);
+  assert(!strcmp(status_now().config_result, "save_failed"));
+  assert(owner == SERVICE_OPERATION_NONE);
+}
+
+static void control_start_respects_service_gate(void) {
+  reset();
+  owner = SERVICE_OPERATION_OTA;
+  assert(printer_control_monitor_start() == ESP_ERR_NOT_ALLOWED);
+  assert(!runtime_active && begins == 0 && owner == SERVICE_OPERATION_OTA);
+  owner = SERVICE_OPERATION_NONE;
+  assert(printer_control_monitor_start() == ESP_OK);
+  assert(runtime_active && owner == SERVICE_OPERATION_NONE);
+  printer_control_monitor_stop();
+  begin_result = ESP_ERR_NOT_ALLOWED;
+  assert(printer_control_monitor_start() == ESP_ERR_NOT_ALLOWED);
+  assert(owner == SERVICE_OPERATION_NONE);
+}
+
 int main(void) {
+  control_forget_reports_async_completion();
+  control_start_respects_service_gate();
   control_reasons();
   control_start_refused_when_not_ready();
   control_begin_refused_by_runtime();
   control_start_paused_begins_held();
+  control_start_refreshes_completion_baseline();
   control_leftover_finish_sequence();
   control_pause_permits_zero();
   control_stop_keeps_heating();

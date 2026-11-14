@@ -3,7 +3,7 @@
 #include "../../components/firmware_update/firmware_update.c"
 static jmp_buf finished;
 static unsigned notifications,jobs,polls;
-static bool suspended,blocked;
+static bool suspended,blocked,monitor_active;
 static uint64_t now;
 const firmware_identity_t custom_app_desc={.version="1.0.0"};
 int64_t esp_timer_get_time(void){return (int64_t)now*1000;}
@@ -18,6 +18,7 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t lock,TickType_t ticks){(void)ticks;a
 BaseType_t xSemaphoreGive(SemaphoreHandle_t lock){assert(lock);return pdTRUE;}
 bool firmware_trial_pending(void){return false;}
 bool app_runtime_maintenance_active(void){return false;}
+bool app_runtime_monitor_active(void){assert(service_operation_current()==SERVICE_OPERATION_OTA);return monitor_active;}
 esp_err_t app_runtime_begin_maintenance(uint32_t t){(void)t;assert(0);return ESP_FAIL;}
 esp_err_t app_runtime_end_maintenance(void){assert(0);return ESP_FAIL;}
 esp_err_t device_config_load_attempt(firmware_attempt_t *v){(void)v;assert(0);return ESP_FAIL;}
@@ -32,6 +33,10 @@ void firmware_job_run(firmware_status_t *status,const firmware_job_ops_t *ops,fi
 static void run(void){notifications=polls=0;assert(firmware_update_request()==ESP_OK);if(!setjmp(finished))worker(NULL);assert(!suspended && service_operation_current()==SERVICE_OPERATION_NONE);}
 int main(void){
     assert(firmware_update_start()==ESP_OK);
+    monitor_active=true;
+    assert(firmware_update_request()==ESP_ERR_NOT_ALLOWED);
+    assert(!suspended && !atomic_load(&s_busy) && service_operation_current()==SERVICE_OPERATION_NONE);
+    monitor_active=false;
     assert(service_operation_begin(SERVICE_OPERATION_PRINTER_CONFIG));assert(firmware_update_request()==ESP_ERR_NOT_ALLOWED);service_operation_end(SERVICE_OPERATION_PRINTER_CONFIG);
     run();assert(jobs==1 && now>=200);
     blocked=true;run();assert(jobs==1 && now>=5200 && s_status.result==FIRMWARE_RESULT_CHECK_FAILED);return 0;

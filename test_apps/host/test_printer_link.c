@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "mqtt_client.h"
 #include "printer_link.h"
+#include "printer_monitor.h"
 #include "printer_transport.h"
 #include <assert.h>
 #include <stdio.h>
@@ -254,6 +255,170 @@ static void report_burst_never_reconnects(void) {
   assert(s.state_known && s.state == PRINTER_RUN_FINISHED);
   assert(aborted == 0 && inits == 1 && s.connected);
 }
+static void monitor_observes_completion_burst(const char *scenario) {
+  start_connected();
+  report_state(!strcmp(scenario, "waiting_burst") ? "FINISH" : "RUNNING");
+  tick_at(1000);
+  printer_monitor_status_t monitor;
+  printer_monitor_init(&monitor);
+  printer_link_status_t link = status();
+  assert(printer_monitor_start(&monitor, &link, now));
+
+  now = 2000;
+  report_state("RUNNING");
+  report_state("FINISH");
+  if (!strcmp(scenario, "watching_burst"))
+    report_state("RUNNING");
+  else if (!strcmp(scenario, "completed_unknown"))
+    event(MQTT_EVENT_DATA, "{malformed");
+  else if (!strcmp(scenario, "completed_reconnect")) {
+    reconnect_at(4000);
+    report_state("RUNNING");
+  }
+  printer_link_tick(now);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_OFF);
+  assert(monitor.last_end == PRINTER_MONITOR_END_FINISHED);
+  assert(!printer_monitor_heat_allowed(&monitor));
+  assert(printer_monitor_end_disables_heating(monitor.last_end));
+}
+static void monitor_retains_start_when_latest_state_is_lost(const char *scenario) {
+  const bool disconnected = !strcmp(scenario, "started_disconnect");
+  const bool malformed = !strcmp(scenario, "started_malformed");
+  start_connected();
+  report_state("FINISH");
+  tick_at(1000);
+  printer_monitor_status_t monitor;
+  printer_monitor_init(&monitor);
+  printer_link_status_t link = status();
+  assert(printer_monitor_start(&monitor, &link, now));
+  assert(monitor.phase == PRINTER_MONITOR_WAITING);
+
+  /* The start arrives just before the no-print deadline, then is hidden
+   * before the coordinator can observe it. */
+  now = 3600000;
+  report_state(disconnected ? "RUNNING" : malformed ? "PAUSE" : "PREPARE");
+  if (disconnected)
+    event(MQTT_EVENT_DISCONNECTED, NULL);
+  else if (malformed)
+    event(MQTT_EVENT_DATA, "{malformed");
+  else
+    report_state("UNKNOWN");
+  printer_link_tick(now);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(!printer_monitor_heat_allowed(&monitor));
+  assert(monitor.hold == (disconnected ? PRINTER_HOLD_DISCONNECTED
+                                      : PRINTER_HOLD_UNKNOWN));
+
+  now = 3601000;
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_WATCHING);
+  assert(monitor.last_end == PRINTER_MONITOR_END_NONE);
+  assert(!printer_monitor_heat_allowed(&monitor));
+
+  if (disconnected) {
+    printer_link_tick(now);
+    connect_events();
+    link = status();
+    printer_monitor_step(&monitor, &link, now);
+    assert(monitor.phase == PRINTER_MONITOR_WATCHING);
+    assert(monitor.hold == PRINTER_HOLD_UNKNOWN);
+    assert(!printer_monitor_heat_allowed(&monitor));
+  }
+  now = 3602000;
+  report_state("RUNNING");
+  printer_link_tick(now);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_WATCHING);
+  assert(printer_monitor_heat_allowed(&monitor));
+
+  now = 3603000;
+  report_state("FINISH");
+  printer_link_tick(now);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_OFF);
+  assert(monitor.last_end == PRINTER_MONITOR_END_FINISHED);
+  assert(printer_monitor_end_disables_heating(monitor.last_end));
+}
+static void prior_completion_does_not_end_new_monitor(void) {
+  start_connected();
+  report_state("RUNNING");
+  report_state("FINISH");
+  tick_at(1000);
+  printer_monitor_status_t monitor;
+  printer_monitor_init(&monitor);
+  printer_link_status_t link = status();
+  assert(printer_monitor_start(&monitor, &link, now));
+  assert(monitor.phase == PRINTER_MONITOR_WAITING);
+  report_state("FINISH");
+  tick_at(2000);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_WAITING);
+  assert(printer_monitor_heat_allowed(&monitor));
+
+  event(MQTT_EVENT_DISCONNECTED, NULL);
+  tick_at(3000);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_WAITING);
+  assert(monitor.hold == PRINTER_HOLD_DISCONNECTED);
+  tick_at(4000);
+  connect_events();
+  report_state("FINISH");
+  printer_link_tick(now);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_WAITING);
+  assert(printer_monitor_heat_allowed(&monitor));
+  report_state("RUNNING");
+  report_state("FAILED");
+  tick_at(5000);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_OFF);
+  assert(monitor.last_end == PRINTER_MONITOR_END_FAILED);
+}
+static void unrecognized_state_keeps_recovery_enabled(void) {
+  start_connected();
+  report_state("UNKNOWN");
+  tick_at(1000);
+  assert(status().connected && status().state == PRINTER_RUN_UNKNOWN);
+  assert(!status().state_known);
+  tick_at(299999);
+  assert(pushalls == 1);
+  tick_at(300000);
+  assert(pushalls == 2 && inits == 1 && aborted == 0);
+  tick_at(300001);
+  assert(pushalls == 2);
+  report_state("RUNNING");
+  tick_at(300100);
+  assert(status().state_known && status().state == PRINTER_RUN_RUNNING);
+  tick_at(900000);
+  assert(pushalls == 2);
+}
+static void pending_completion_before_start_is_historical(void) {
+  start_connected();
+  report_state("FINISH");
+  tick_at(1000);
+  now = 2000;
+  report_state("RUNNING");
+  report_state("FINISH");
+  /* Start before the worker has drained the two reports above. */
+  printer_link_status_t link = status();
+  printer_monitor_status_t monitor;
+  printer_monitor_init(&monitor);
+  assert(printer_monitor_start(&monitor, &link, now));
+  tick_at(2100);
+  link = status();
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.phase == PRINTER_MONITOR_WAITING);
+  assert(printer_monitor_heat_allowed(&monitor));
+}
 static void reconnect_counter(void) {
   start_connected();
   reconnect_at(10000);
@@ -305,6 +470,21 @@ int main(int argc, char **argv) {
       malformed_report_marks_unknown_without_reconnect();
     else if (!strcmp(argv[1], "burst"))
       report_burst_never_reconnects();
+    else if (!strcmp(argv[1], "waiting_burst") ||
+             !strcmp(argv[1], "watching_burst") ||
+             !strcmp(argv[1], "completed_unknown") ||
+             !strcmp(argv[1], "completed_reconnect"))
+      monitor_observes_completion_burst(argv[1]);
+    else if (!strcmp(argv[1], "started_disconnect") ||
+             !strcmp(argv[1], "started_unknown") ||
+             !strcmp(argv[1], "started_malformed"))
+      monitor_retains_start_when_latest_state_is_lost(argv[1]);
+    else if (!strcmp(argv[1], "prior_completion"))
+      prior_completion_does_not_end_new_monitor();
+    else if (!strcmp(argv[1], "pending_completion"))
+      pending_completion_before_start_is_historical();
+    else if (!strcmp(argv[1], "unknown_recovery"))
+      unrecognized_state_keeps_recovery_enabled();
     else if (!strcmp(argv[1], "reconnect_counter"))
       reconnect_counter();
     else if (!strcmp(argv[1], "disconnect"))

@@ -20,6 +20,18 @@ static bool sample_is_healthy(const temperature_sample_t *sample)
            isfinite(sample->raw_c) && isfinite(sample->filtered_c);
 }
 
+static bool sample_is_retrying(const temperature_sample_t *sample)
+{
+    if (sample->consecutive_failures == 0U ||
+        sample->consecutive_failures >= TEMPERATURE_SENSOR_FAILURE_LIMIT) {
+        return false;
+    }
+    return sample->fault == HEAT_FAULT_SENSOR_OPEN ||
+           sample->fault == HEAT_FAULT_SENSOR_SHORT ||
+           sample->fault == HEAT_FAULT_SENSOR_RANGE ||
+           sample->fault == HEAT_FAULT_SENSOR_INVALID;
+}
+
 static void record_output(heat_controller_t *controller,
                           bool output_on,
                           uint64_t now_ms)
@@ -102,6 +114,11 @@ void heat_controller_step(heat_controller_t *controller,
         return;
     }
     if (!sample_is_healthy(sample)) {
+        /* Only new acquisitions advance the retry count. Hold the existing
+         * output during retries; stale-task and other faults remain immediate. */
+        if (sample_is_retrying(sample)) {
+            return;
+        }
         latch_fault(controller, sample->fault, now_ms);
         return;
     }
@@ -125,6 +142,7 @@ void heat_controller_step(heat_controller_t *controller,
     }
 
     if (!controller->snapshot.output_on &&
+        sample->consecutive_valid >= 3U &&
         sample->filtered_c <=
             (controller->snapshot.target_c -
              controller->config.hysteresis_c)) {

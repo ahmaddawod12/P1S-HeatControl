@@ -142,3 +142,80 @@ test('Forget clears an unchanged draft after its reply',async()=>{
   assert.equal(b.element('printer-access-code').value,'');
   assert.equal(b.element('printer-ipv4').value,'');assert.equal(b.element('printer-serial').value,'');
 });
+
+test('Forget waits for storage confirmation before clearing an unchanged draft',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','old-draft');
+  b.reply(202);b.set({applying:true,config_result:'pending'});
+  b.click('printer-forget');await flush();
+  assert.equal(b.element('printer-access-code').value,'old-draft');
+  assert.equal(b.element('printer-forget').disabled,true);
+  b.set({configured:false,enabled:false,access_code_set:false,ipv4:'',serial:'',applying:false,config_result:'saved'});
+  await b.poll();
+  assert.equal(b.element('printer-access-code').value,'');
+  assert.equal(b.element('printer-ipv4').value,'');
+  assert.equal(b.element('printer-message').textContent,'');
+});
+
+test('failed asynchronous Forget retains the draft and allows a deliberate retry',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','old-draft');
+  b.reply(202);b.set({applying:true,config_result:'pending'});b.click('printer-forget');await flush();
+  b.set({applying:false,config_result:'save_failed'});await b.poll();
+  assert.equal(b.element('printer-access-code').value,'old-draft');
+  assert.match(b.element('printer-message').textContent,/could not be forgotten/);
+  assert.equal(b.element('printer-forget').disabled,false);
+  assert.equal(b.calls.filter(c=>c.options.method==='DELETE').length,1);
+});
+
+test('asynchronous Forget preserves edits entered after acceptance',async()=>{
+  const b=browser();await flush();b.reply(202);b.set({applying:true,config_result:'pending'});
+  b.click('printer-forget');await flush();b.edit('printer-ipv4','192.168.1.99');b.edit('printer-access-code','new-code');
+  b.set({configured:false,enabled:false,access_code_set:false,ipv4:'',serial:'',applying:false,config_result:'saved'});
+  await b.poll();
+  assert.equal(b.element('printer-ipv4').value,'192.168.1.99');
+  assert.equal(b.element('printer-access-code').value,'new-code');
+});
+
+test('confirmed deletion resolves an uncertain Forget response',async()=>{
+  const b=browser();await flush();b.reply(503);b.set({applying:true,config_result:'pending'});
+  b.click('printer-forget');await flush();
+  b.set({configured:false,enabled:false,access_code_set:false,ipv4:'',serial:'',applying:false,config_result:'saved'});
+  await b.poll();
+  assert.equal(b.element('printer-message').textContent,'');
+  assert.equal(b.calls.filter(c=>c.options.method==='DELETE').length,1);
+});
+
+test('a status poll before Forget acceptance cannot consume its pending draft',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','old-draft');
+  b.reply(202);b.holdDelete(true);b.click('printer-forget');
+  await b.poll();
+  b.set({configured:false,enabled:false,access_code_set:false,ipv4:'',serial:'',applying:false,config_result:'saved'});
+  b.releaseDelete();await flush();
+  assert.equal(b.element('printer-access-code').value,'');
+  assert.equal(b.element('printer-ipv4').value,'');
+  assert.equal(b.element('printer-message').textContent,'');
+});
+
+test('a pre-acceptance GET delivered after Forget acceptance cannot resolve it',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','old-draft');
+  b.reply(202);b.holdDelete(true);b.click('printer-forget');
+  b.hold(true);await b.poll();
+  b.set({applying:true,config_result:'pending'});b.releaseDelete();await flush();
+  b.release();await flush();
+  assert.equal(b.element('printer-access-code').value,'old-draft');
+  b.hold(false);b.set({configured:false,enabled:false,access_code_set:false,ipv4:'',serial:'',applying:false,config_result:'saved'});
+  await b.poll();
+  assert.equal(b.element('printer-access-code').value,'');
+  assert.equal(b.element('printer-message').textContent,'');
+});
+
+test('an old deleted status cannot erase a replacement draft before Forget rejection',async()=>{
+  const b=browser({configured:false,enabled:false,access_code_set:false,ipv4:'',serial:'',config_result:'saved'});
+  await flush();b.edit('printer-ipv4','192.168.1.99');b.edit('printer-serial','NEW123');b.edit('printer-access-code','new-code');
+  b.reply(409);b.holdDelete(true);b.click('printer-forget');await b.poll();
+  assert.equal(b.element('printer-access-code').value,'new-code');
+  b.releaseDelete();await flush();
+  assert.equal(b.element('printer-ipv4').value,'192.168.1.99');
+  assert.equal(b.element('printer-serial').value,'NEW123');
+  assert.equal(b.element('printer-access-code').value,'new-code');
+  assert.match(b.element('printer-message').textContent,/could not be forgotten/);
+});

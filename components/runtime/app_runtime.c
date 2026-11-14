@@ -19,8 +19,8 @@
 #include "settings.h"
 #include "temperature_monitor.h"
 
-#define SAMPLE_PERIOD_MS 500U
-#define CONTROL_PERIOD_MS 100U
+#define SAMPLE_PERIOD_MS 1000U
+#define CONTROL_PERIOD_MS 500U
 #define COMMAND_QUEUE_DEPTH 8U
 #define ACK_RESPONSE_TIMEOUT_MS 500U
 #define TEMPERATURE_TASK_STACK 4096
@@ -49,6 +49,7 @@ static unsigned s_pending_commands;
 /* Written under s_admission_lock; the flag is also read lock-free. */
 static atomic_bool s_monitor_active;
 static uint64_t s_monitor_permit_until;
+static unsigned s_monitor_enable_epoch;
 /* Guarded by s_admission_lock. Reserves one queue slot during persistence. */
 static bool s_settings_save_pending;
 static TaskHandle_t s_temperature_task;
@@ -160,8 +161,8 @@ static void temperature_task(void *arg)
         xQueueOverwrite(s_sample_queue, &sample);
         xSemaphoreGive(s_admission_lock);
 
-        /* The 400 ms conversion is part of the 500 ms sampling cycle. The
-         * independent controller task keeps responding every 100 ms. */
+        /* The 400 ms conversion is part of the 1000 ms sampling cycle. The
+         * independent controller task keeps responding every 500 ms. */
         const uint64_t elapsed_ms = now_ms() - cycle_start_ms;
         vTaskDelay(pdMS_TO_TICKS(elapsed_ms < SAMPLE_PERIOD_MS
             ? SAMPLE_PERIOD_MS - elapsed_ms : 1U));
@@ -214,7 +215,7 @@ static void controller_task(void *arg)
             have_sample = true;
         }
 
-        if (have_sample && sample.valid &&
+        if (have_sample &&
             timestamp_ms - sample.timestamp_ms > TEMPERATURE_SAMPLE_MAX_AGE_MS) {
             /* Check age in the control task: acquisition may be stalled and
              * cannot be responsible for timing out its own last sample. */
@@ -238,6 +239,9 @@ static void controller_task(void *arg)
 
         const bool urgent_disable = atomic_exchange(&s_urgent_disable, false);
         if (urgent_disable) {
+            /* A subsequent queued Enable may run in this same iteration.
+             * Disable still ends the old monitoring session. */
+            atomic_store(&s_monitor_active, false);
             const heat_controller_command_t disable = {.kind = HEAT_COMMAND_DISABLE};
             (void) heat_controller_command(&s_controller, &disable, sample_arg, timestamp_ms);
         }
@@ -403,6 +407,7 @@ esp_err_t app_runtime_start_with_ops(const app_runtime_ops_t *ops)
     diagnostics_reset();
     atomic_store(&s_monitor_active, false);
     s_monitor_permit_until = 0;
+    s_monitor_enable_epoch = 0;
     s_pending_commands = 0;
     s_settings_save_pending = false;
     atomic_store(&s_urgent_disable, false);
@@ -704,6 +709,7 @@ esp_err_t app_runtime_monitor_begin(uint64_t permit_until_ms)
     if (!s_running || !s_admission_lock) return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(s_admission_lock, pdMS_TO_TICKS(100)) != pdTRUE) return ESP_ERR_TIMEOUT;
     const heat_controller_snapshot_t heat = heat_controller_snapshot(&s_controller);
+    const unsigned enable_epoch = atomic_load(&s_enable_epoch);
     esp_err_t err = ESP_OK;
     if (permit_until_ms > now_ms() + APP_RUNTIME_MONITOR_PERMIT_MAX_MS) {
         err = ESP_ERR_INVALID_ARG;
@@ -713,6 +719,7 @@ esp_err_t app_runtime_monitor_begin(uint64_t permit_until_ms)
         err = ESP_ERR_NOT_ALLOWED;
     } else {
         s_monitor_permit_until = permit_until_ms;
+        s_monitor_enable_epoch = enable_epoch;
         atomic_store(&s_monitor_active, true);
     }
     xSemaphoreGive(s_admission_lock);
@@ -731,9 +738,16 @@ esp_err_t app_runtime_monitor_permit(uint64_t permit_until_ms)
 }
 void app_runtime_monitor_end(bool disable_heating)
 {
-    if (disable_heating) (void) app_runtime_set_enabled(false);
     if (!s_running || !s_admission_lock) return;
     xSemaphoreTake(s_admission_lock, portMAX_DELAY);
+    unsigned expected_epoch = s_monitor_enable_epoch;
+    if (disable_heating && atomic_load(&s_monitor_active) &&
+        atomic_compare_exchange_strong(&s_enable_epoch, &expected_epoch,
+                                       expected_epoch + 1U)) {
+        /* Disable ends this monitor even before the controller consumes it.
+         * Claim only the original session; a later owner Enable must survive. */
+        atomic_store(&s_urgent_disable, true);
+    }
     atomic_store(&s_monitor_active, false);
     xSemaphoreGive(s_admission_lock);
 }

@@ -22,7 +22,11 @@ typedef struct {
   bool connected, state_known;
   printer_run_state_t state;
   uint64_t received_ms; /* last push_status report of any content; 0 = none */
-  uint32_t reconnects;
+  uint32_t reconnects, connection_epoch;
+  /* Monotonic across reconnects; retain starts and active -> terminal
+   * transitions even when later reports hide the current state before a poll. */
+  uint64_t started_prints, completed_prints;
+  printer_run_state_t last_completed_state;
 } printer_link_status_t;
 typedef enum {
   PRINTER_MONITOR_OFF,
@@ -50,6 +54,8 @@ typedef struct {
   printer_hold_t hold;
   printer_monitor_end_t last_end;
   uint64_t started_ms;
+  uint64_t started_prints_at_start;
+  uint64_t completed_prints_at_start;
 } printer_monitor_status_t;
 typedef struct {
   printer_connection_config_t value;

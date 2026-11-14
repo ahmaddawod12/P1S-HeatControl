@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define TEMPERATURE_SAMPLE_MAX_AGE_MS 2000U
+#define TEMPERATURE_SENSOR_FAILURE_LIMIT 5U
 
 typedef enum {
     HEAT_STATE_BOOT = 0,
@@ -30,6 +31,7 @@ typedef struct {
     float filtered_c;
     bool valid;
     uint8_t consecutive_valid;
+    uint8_t consecutive_failures;
     uint64_t timestamp_ms;
     heat_fault_t fault;
 } temperature_sample_t;

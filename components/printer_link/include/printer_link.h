@@ -18,6 +18,7 @@ esp_err_t printer_link_start(void);
 esp_err_t printer_link_start_with_ops(const printer_link_ops_t *);
 esp_err_t printer_link_configure(const printer_connection_config_t *);
 void printer_link_tick(uint64_t now_ms);
+/* Thread-safe snapshot including pending reports. Does not consume history. */
 void printer_link_get_status(printer_link_status_t *out);
 /* Immediate invalidation; resource teardown is acknowledged by quiescent after
  * tick. */

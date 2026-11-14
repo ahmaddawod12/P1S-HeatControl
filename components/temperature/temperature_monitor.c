@@ -94,10 +94,14 @@ void temperature_monitor_push(temperature_monitor_t *monitor,
     monitor->has_sample = true;
     monitor->last_timestamp_ms = timestamp_ms;
     monitor->fault = map_sensor_fault(sensor_fault);
+    const float calibrated = raw_temperature_c + monitor->calibration_offset_c;
     if (monitor->fault != HEAT_FAULT_NONE ||
-        !isfinite(raw_temperature_c)) {
+        !isfinite(raw_temperature_c) || !isfinite(calibrated)) {
         if (monitor->fault == HEAT_FAULT_NONE) {
             monitor->fault = HEAT_FAULT_SENSOR_INVALID;
+        }
+        if (monitor->consecutive_failures < TEMPERATURE_SENSOR_FAILURE_LIMIT) {
+            ++monitor->consecutive_failures;
         }
         monitor->consecutive_valid = 0U;
         monitor->count = 0U;
@@ -106,17 +110,7 @@ void temperature_monitor_push(temperature_monitor_t *monitor,
         return;
     }
 
-    const float calibrated =
-        raw_temperature_c + monitor->calibration_offset_c;
-    if (!isfinite(calibrated)) {
-        monitor->fault = HEAT_FAULT_SENSOR_INVALID;
-        monitor->consecutive_valid = 0U;
-        monitor->count = 0U;
-        monitor->next = 0U;
-        monitor->last_raw_c = NAN;
-        return;
-    }
-
+    monitor->consecutive_failures = 0U;
     monitor->last_raw_c = calibrated;
     monitor->window[monitor->next] = calibrated;
     monitor->next =
@@ -148,13 +142,11 @@ temperature_sample_t temperature_monitor_snapshot(
     sample.raw_c = monitor->last_raw_c;
     sample.filtered_c = median(monitor);
     sample.consecutive_valid = monitor->consecutive_valid;
+    sample.consecutive_failures = monitor->consecutive_failures;
     sample.timestamp_ms = monitor->last_timestamp_ms;
     sample.fault = monitor->fault;
 
     if (!monitor->has_sample) {
-        return sample;
-    }
-    if (monitor->fault != HEAT_FAULT_NONE) {
         return sample;
     }
     if ((now_ms - monitor->last_timestamp_ms) > TEMPERATURE_SAMPLE_MAX_AGE_MS) {
@@ -162,6 +154,9 @@ temperature_sample_t temperature_monitor_snapshot(
         monitor->consecutive_valid = 0U;
         sample.fault = HEAT_FAULT_SENSOR_STALE;
         sample.consecutive_valid = 0U;
+        return sample;
+    }
+    if (monitor->fault != HEAT_FAULT_NONE) {
         return sample;
     }
 
