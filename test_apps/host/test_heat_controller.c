@@ -265,6 +265,44 @@ static void test_external_fault_policy(void)
 
 static const heat_controller_command_t k_enable = {.kind = HEAT_COMMAND_ENABLE};
 
+static void test_output_init_fault_survives_later_storage_faults(void)
+{
+    const heat_controller_command_t output_fault = {
+        .kind = HEAT_COMMAND_LATCH_EXTERNAL_FAULT,
+        .fault = HEAT_FAULT_OUTPUT_INIT,
+    };
+    const heat_controller_command_t nvs_fault = {
+        .kind = HEAT_COMMAND_LATCH_EXTERNAL_FAULT,
+        .fault = HEAT_FAULT_NVS,
+    };
+    const heat_controller_command_t disable = {.kind = HEAT_COMMAND_DISABLE};
+    const heat_controller_command_t target = {
+        .kind = HEAT_COMMAND_SET_TARGET, .target_c = 50.0f,
+    };
+    const heat_controller_command_t acknowledge = {.kind = HEAT_COMMAND_ACK_FAULT};
+    const temperature_sample_t cold = sample(40.0f, 40.0f, true, 3U, HEAT_FAULT_NONE);
+
+    for (unsigned nvs_first = 0U; nvs_first < 2U; ++nvs_first) {
+        heat_controller_t controller = ready_controller();
+        assert(heat_controller_command(&controller, &k_enable, &cold, 0U));
+        if (nvs_first) {
+            assert(heat_controller_command(&controller, &nvs_fault, &cold, 100U));
+        }
+        assert(heat_controller_command(&controller, &output_fault, &cold, 200U));
+        assert(heat_controller_command(&controller, &nvs_fault, &cold, 300U));
+        assert(heat_controller_command(&controller, &nvs_fault, &cold, 400U));
+        assert(heat_controller_snapshot(&controller).fault == HEAT_FAULT_OUTPUT_INIT);
+        assert(!heat_controller_command(&controller, &acknowledge, &cold, 500U));
+        assert(heat_controller_command(&controller, &disable, &cold, 600U));
+        assert(heat_controller_command(&controller, &target, &cold, 700U));
+        assert(!heat_controller_command(&controller, &k_enable, &cold, 800U));
+        heat_controller_step(&controller, &cold, 10000U);
+        const heat_controller_snapshot_t status = heat_controller_snapshot(&controller);
+        assert(status.state == HEAT_STATE_FAULT && status.fault == HEAT_FAULT_OUTPUT_INIT);
+        assert(!status.enabled && !status.output_on);
+    }
+}
+
 static void test_inhibit_holds_output_off(void)
 {
     heat_controller_t controller = ready_controller();
@@ -487,6 +525,7 @@ static void test_disable_and_staleness_bypass_retry_allowance(void)
 
 int main(void)
 {
+    test_output_init_fault_survives_later_storage_faults();
     test_five_failed_acquisitions_latch_even_with_mixed_errors();
     test_one_success_resets_all_previous_failures();
     test_startup_retries_cannot_enable_heating();

@@ -98,6 +98,32 @@ TEST_CASE("controller validates half degree targets", "[controller]")
     TEST_ASSERT_FALSE(heat_target_is_valid(NAN));
 }
 
+TEST_CASE("output initialization fault survives a later storage fault", "[controller]")
+{
+    heat_controller_t controller = ready_controller();
+    const temperature_sample_t reading = valid_sample(40.0f);
+    const heat_controller_command_t output_fault = {
+        .kind = HEAT_COMMAND_LATCH_EXTERNAL_FAULT,
+        .fault = HEAT_FAULT_OUTPUT_INIT,
+    };
+    const heat_controller_command_t nvs_fault = {
+        .kind = HEAT_COMMAND_LATCH_EXTERNAL_FAULT,
+        .fault = HEAT_FAULT_NVS,
+    };
+    const heat_controller_command_t acknowledge = {.kind = HEAT_COMMAND_ACK_FAULT};
+    const heat_controller_command_t enable = {.kind = HEAT_COMMAND_ENABLE};
+
+    TEST_ASSERT_TRUE(heat_controller_command(&controller, &output_fault, &reading, 0U));
+    TEST_ASSERT_TRUE(heat_controller_command(&controller, &nvs_fault, &reading, 100U));
+    TEST_ASSERT_EQUAL(HEAT_FAULT_OUTPUT_INIT, heat_controller_snapshot(&controller).fault);
+    TEST_ASSERT_FALSE(heat_controller_command(&controller, &acknowledge, &reading, 200U));
+    TEST_ASSERT_FALSE(heat_controller_command(&controller, &enable, &reading, 300U));
+    const heat_controller_snapshot_t status = heat_controller_snapshot(&controller);
+    TEST_ASSERT_EQUAL(HEAT_STATE_FAULT, status.state);
+    TEST_ASSERT_FALSE(status.enabled);
+    TEST_ASSERT_FALSE(status.output_on);
+}
+
 TEST_CASE("controller heats continuously until target", "[controller]")
 {
     heat_controller_t controller = ready_controller();

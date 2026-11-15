@@ -117,6 +117,11 @@
   <section class="card wifi-card" aria-labelledby="wifi-heading">
     <h2 id="wifi-heading">Wi-Fi settings</h2>
     <form id="wifi-form">
+      <label for="wifi-controller-name">Controller name (optional)</label>
+      <input type="text" id="wifi-controller-name" maxlength="22" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="wifi-name-help wifi-name-preview wifi-name-error">
+      <p class="hint" id="wifi-name-help">Use up to 22 letters, numbers, or hyphens. Leave empty for p1s-1. If a name is taken, the controller tries p1s-1, p1s-2, and so on, then saves the available name.</p>
+      <p class="hint" id="wifi-name-preview" aria-live="polite">Address: http://p1s-1.local/</p>
+      <p class="hint" id="wifi-name-error" role="alert" hidden></p>
       <label for="wifi-ssid">Network name (SSID)</label>
       <input type="text" id="wifi-ssid" autocomplete="off" autocapitalize="none" spellcheck="false" required>
       <label for="wifi-password">Wi-Fi password</label>
@@ -129,8 +134,8 @@
     <p class="hint">Setup hotspot: <span id="wifi-hotspot">--</span></p>
     <a id="wifi-station-link" class="wifi-address" hidden>Open controller</a>
     <p class="hint">After changing networks, join your new Wi-Fi and open
-      <a id="wifi-discovery-link" href="http://p1s-heat.local/">p1s-heat.local</a>.
-      The setup hotspot may already have closed after a successful connection.</p>
+      <a id="wifi-discovery-link" hidden>the controller address</a>.
+      If the name was taken, setup shows the final numbered address. The setup hotspot may already have closed after a successful connection.</p>
   </section>
 </main>
 

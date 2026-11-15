@@ -2,9 +2,11 @@
 #include "esp_err.h"
 #include "firmware_types.h"
 #include "printer_types.h"
+#include "device_name.h"
 
 typedef struct {
   char ssid[33], password[64];
+  char controller_name[DEVICE_NAME_LEN];
 } device_wifi_credentials_t;
 esp_err_t device_config_init(void);
 esp_err_t device_config_load_wifi(device_wifi_credentials_t *out);

@@ -41,13 +41,18 @@ bool wifi_request_parse(const char *body,size_t length,wifi_credentials_t *out)
     cJSON_ArrayForEach(item,root) {
         ++count;
         if (!cJSON_IsString(item) || !item->string) { valid=false; break; }
-        const unsigned field=strcmp(item->string,"ssid")==0?1:strcmp(item->string,"password")==0?2:0;
+        const unsigned field=strcmp(item->string,"ssid")==0?1:strcmp(item->string,"password")==0?2:
+            strcmp(item->string,"controller_name")==0?4:0;
         if (!field || (seen&field)) { valid=false; break; }
         seen|=field;
     }
-    if (valid && count==2 && seen==3) {
-        valid=wifi_credentials_init(out,cJSON_GetObjectItemCaseSensitive(root,"ssid")->valuestring,
+    if (valid && ((count==2 && seen==3) || (count==3 && seen==7))) {
+        wifi_credentials_t credentials;
+        valid=wifi_credentials_init(&credentials,cJSON_GetObjectItemCaseSensitive(root,"ssid")->valuestring,
             cJSON_GetObjectItemCaseSensitive(root,"password")->valuestring)==ESP_OK;
+        const cJSON *name=cJSON_GetObjectItemCaseSensitive(root,"controller_name");
+        if (valid && name) valid=device_name_normalize(name->valuestring,credentials.controller_name)==ESP_OK;
+        if (valid) *out=credentials;
     } else valid=false;
     cJSON_Delete(root);
     return valid;

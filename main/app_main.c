@@ -13,7 +13,7 @@ void app_main(void)
     const esp_err_t update_err = firmware_update_start();
     if (update_err != ESP_OK) ESP_LOGE(TAG, "updater unavailable: %s", esp_err_to_name(update_err));
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "controller ready and disabled; open http://p1s-heat.local");
+        ESP_LOGI(TAG, "controller ready and disabled; address is shown in Wi-Fi settings");
         return;
     }
 

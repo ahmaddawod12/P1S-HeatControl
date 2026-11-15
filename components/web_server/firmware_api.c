@@ -69,7 +69,13 @@ bool firmware_api_request_trusted(httpd_req_t *req)
 #endif
     } else return false;
     if (!inet_ntop(AF_INET, &ipv4, local, sizeof(local))) return false;
-    return firmware_request_origin_valid(host, origin, local, port);
+    char hostname[DEVICE_HOSTNAME_LEN+6]={0};
+    if (s_ops.get_wifi_status) {
+        wifi_manager_status_t wifi={0};
+        s_ops.get_wifi_status(&wifi);
+        if (wifi.hostname[0]) snprintf(hostname,sizeof(hostname),"%s.local",wifi.hostname);
+    }
+    return firmware_request_origin_valid(host, origin, local, port, hostname);
 }
 static esp_err_t request_update(httpd_req_t *req)
 {

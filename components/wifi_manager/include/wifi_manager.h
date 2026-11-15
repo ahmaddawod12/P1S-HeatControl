@@ -26,6 +26,9 @@ typedef struct {
     char ip_addr[WIFI_MANAGER_IP_LEN];
     int8_t rssi;
     char password[WIFI_MANAGER_PASSWORD_LEN];
+    char controller_name[DEVICE_NAME_LEN];
+    char hostname[DEVICE_HOSTNAME_LEN], requested_name[DEVICE_NAME_LEN];
+    bool name_pending;
     bool configured, ap_active, applying, can_save;
     char ap_ssid[WIFI_MANAGER_SSID_LEN], ap_ip[WIFI_MANAGER_IP_LEN];
     wifi_result_t result;

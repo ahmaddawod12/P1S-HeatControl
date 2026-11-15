@@ -4,7 +4,7 @@ const html=fs.readFileSync(path.join(__dirname,'../../web/index.html'),'utf8');
 const appSource=fs.readFileSync(path.join(__dirname,'../../web/app.js'),'utf8');
 const flush=async()=>{for(let i=0;i<6;++i)await new Promise(setImmediate);};
 function browser(initial={}){
-  const nodes=new Map(),timers=new Map(),calls=[],events=[],docEvents={};let seq=0,offline=false,lose=false,reply=202,hold=false,pending=[],holdDelete=false,pendingDeletes=[];
+  const nodes=new Map(),timers=new Map(),calls=[],events=[],docEvents={};let seq=0,offline=false,lose=false,reply=202,hold=false,pending=[],holdDelete=false,pendingDeletes=[],holdPut=false,pendingPuts=[];
   let status={configured:true,enabled:true,access_code_set:true,ipv4:'192.168.1.20',serial:'SERIAL123',applying:false,config_result:'saved',
     connected:true,printer_state:'running',reconnects:0,can_monitor:true,csrf_token:'csrf-one',reason:'ready',
     monitor:{phase:'off',hold:'none',last_end:'none',wait_remaining_ms:0},...initial};
@@ -14,11 +14,13 @@ function browser(initial={}){
   const context={document,console,TextEncoder,CustomEvent:class{constructor(type,o){this.type=type;this.detail=o.detail;}},
     dispatchEvent(e){events.push(e.detail);},setTimeout(fn,delay){const id=++seq;timers.set(id,{fn,delay});return id;},clearTimeout(id){timers.delete(id);},
     fetch:async(url,options={})=>{calls.push({url,options});if(options.method){if(lose)throw Error('lost response');const response={ok:reply>=200&&reply<300,status:reply,json:async()=>({error:'printer_conflict'})};
-      if(holdDelete&&options.method==='DELETE')return new Promise(resolve=>pendingDeletes.push(()=>resolve(response)));return response;}
+      if(holdDelete&&options.method==='DELETE')return new Promise(resolve=>pendingDeletes.push(()=>resolve(response)));
+      if(holdPut&&options.method==='PUT')return new Promise(resolve=>pendingPuts.push(()=>resolve(response)));return response;}
       if(offline)throw Error('offline');const snapshot=JSON.parse(JSON.stringify(status));if(hold)return new Promise(resolve=>pending.push(()=>resolve({ok:true,json:async()=>snapshot})));
       return {ok:true,json:async()=>snapshot};}};context.window=context;vm.runInNewContext(source,context,{filename:'printer.js'});
   return {element,calls,events,document,timers,set(v){status={...status,...v};},offline(v){offline=v;},lose(v){lose=v;},reply(v){reply=v;},hold(v){hold=v;},release(){pending.shift()();},
     holdDelete(v){holdDelete=v;},releaseDelete(){pendingDeletes.shift()();},
+    holdPut(v){holdPut=v;},releasePut(){pendingPuts.shift()();},
     click(id){element(id).listeners.click();},
     edit(id,value){element(id).value=value;element(id).listeners.input();},save(){element('printer-form').listeners.submit({preventDefault(){}});},
     visible(v){document.hidden=!v;docEvents.visibilitychange();},async poll(){const e=[...timers.entries()].at(-1);assert.ok(e,'poll scheduled');assert.equal(e[1].delay,1000);timers.delete(e[0]);e[1].fn();await flush();}};
@@ -103,6 +105,58 @@ test('polling preserves edits and never fills the write-only access code',async(
   b.edit('printer-ipv4','192.168.1.21');await b.poll();assert.equal(b.element('printer-ipv4').value,'192.168.1.21');
   b.save();await flush();const save=b.calls.find(c=>c.options.method==='PUT');assert.ok(save);assert.equal('access_code' in JSON.parse(save.options.body),false);
   assert.equal('ntp_host' in JSON.parse(save.options.body),false);
+});
+
+test('an old saved status cannot erase a replacement code before Save rejection',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','replacement-code');
+  b.reply(409);b.holdPut(true);b.save();await b.poll();
+  assert.equal(b.element('printer-access-code').value,'replacement-code');
+  b.releasePut();await flush();
+  assert.equal(b.element('printer-access-code').value,'replacement-code');
+  assert.match(b.element('printer-message').textContent,/draft is kept/);
+  assert.equal(b.element('printer-save').disabled,false);
+  assert.equal(b.calls.filter(c=>c.options.method==='PUT').length,1);
+});
+
+test('a pre-acceptance GET delivered after Save acceptance cannot confirm it',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','replacement-code');
+  b.reply(202);b.holdPut(true);b.save();b.hold(true);await b.poll();
+  b.set({applying:true,config_result:'pending'});b.releasePut();await flush();
+  b.release();await flush();
+  assert.equal(b.element('printer-access-code').value,'replacement-code');
+  assert.equal(b.element('printer-save').disabled,true);
+  b.hold(false);b.set({applying:false,config_result:'saved'});await b.poll();
+  assert.equal(b.element('printer-access-code').value,'');
+  assert.equal(b.element('printer-save').disabled,false);
+  assert.equal(b.element('printer-message').textContent,'');
+  assert.equal(b.calls.filter(c=>c.options.method==='PUT').length,1);
+});
+
+test('failed asynchronous Save retains the code and allows a deliberate retry',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','replacement-code');
+  b.set({applying:true,config_result:'pending'});b.save();await flush();
+  b.set({applying:false,config_result:'save_failed'});await b.poll();
+  assert.equal(b.element('printer-access-code').value,'replacement-code');
+  assert.match(b.element('printer-message').textContent,/could not be saved/);
+  assert.equal(b.element('printer-save').disabled,false);
+  assert.equal(b.calls.filter(c=>c.options.method==='PUT').length,1);
+  b.set({applying:true,config_result:'pending'});b.save();await flush();
+  const puts=b.calls.filter(c=>c.options.method==='PUT');
+  assert.equal(puts.length,2);
+  assert.equal(JSON.parse(puts[1].options.body).access_code,'replacement-code');
+  b.set({applying:false,config_result:'saved'});await b.poll();
+  assert.equal(b.element('printer-access-code').value,'');
+});
+
+test('successful Save preserves connection and code edits made after acceptance',async()=>{
+  const b=browser();await flush();b.edit('printer-access-code','submitted-code');
+  b.set({applying:true,config_result:'pending'});b.save();await flush();
+  b.edit('printer-ipv4','192.168.1.99');b.edit('printer-access-code','newer-code');
+  b.set({applying:false,config_result:'saved'});await b.poll();
+  assert.equal(b.element('printer-ipv4').value,'192.168.1.99');
+  assert.equal(b.element('printer-access-code').value,'newer-code');
+  assert.equal(b.element('printer-save').disabled,false);
+  assert.equal(b.calls.filter(c=>c.options.method==='PUT').length,1);
 });
 
 test('an unreadable optional configuration can be deliberately forgotten',async()=>{

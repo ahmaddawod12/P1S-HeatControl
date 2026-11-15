@@ -7,7 +7,8 @@
 
 #define DEVICE_PARTITION "device_cfg"
 #define DEVICE_NAMESPACE "p1s_device"
-#define WIFI_BYTES 101U
+#define WIFI_LEGACY_BYTES 101U
+#define WIFI_BYTES (WIFI_LEGACY_BYTES + DEVICE_NAME_LEN)
 #define ATTEMPT_BYTES 80U
 
 static atomic_bool s_ready;
@@ -20,7 +21,8 @@ static bool text_fits(const char *s, size_t capacity)
 static bool wifi_valid(const device_wifi_credentials_t *wifi)
 {
     if (!wifi || !text_fits(wifi->ssid, sizeof(wifi->ssid)) ||
-        !text_fits(wifi->password, sizeof(wifi->password)) || wifi->ssid[0] == 0) return false;
+        !text_fits(wifi->password, sizeof(wifi->password)) || wifi->ssid[0] == 0 ||
+        !device_name_valid_n(wifi->controller_name, sizeof(wifi->controller_name))) return false;
     const size_t n = strlen(wifi->password);
     return n == 0 || (n >= 8 && n <= 63);
 }
@@ -32,7 +34,7 @@ esp_err_t device_config_init(void)
     return err;
 }
 
-static esp_err_t read_record(const char *key, uint8_t *bytes, size_t expected)
+static esp_err_t read_record_version(const char *key, uint8_t *bytes, size_t expected, uint32_t version)
 {
     if (!atomic_load(&s_ready)) return ESP_ERR_INVALID_STATE;
     nvs_handle_t handle;
@@ -44,8 +46,10 @@ static esp_err_t read_record(const char *key, uint8_t *bytes, size_t expected)
     nvs_close(handle);
     if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_ERR_NOT_FOUND;
     if (err != ESP_OK) return err;
-    return size == expected && get_u32(bytes) == 1 ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+    return size == expected && get_u32(bytes) == version ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
+static esp_err_t read_record(const char *key, uint8_t *bytes, size_t expected)
+{ return read_record_version(key, bytes, expected, 1); }
 
 static esp_err_t write_record(const char *key, const uint8_t *bytes, size_t size)
 {
@@ -80,11 +84,14 @@ esp_err_t device_config_load_wifi(device_wifi_credentials_t *out)
 {
     if (!out) return ESP_ERR_INVALID_ARG;
     uint8_t bytes[WIFI_BYTES];
-    esp_err_t err = read_record("wifi_v1", bytes, sizeof(bytes));
+    esp_err_t err = read_record_version("wifi_v2", bytes, sizeof(bytes), 2);
+    const bool legacy = err == ESP_ERR_NOT_FOUND;
+    if (legacy) err = read_record("wifi_v1", bytes, WIFI_LEGACY_BYTES);
     if (err != ESP_OK) return err;
-    device_wifi_credentials_t wifi;
+    device_wifi_credentials_t wifi = {0};
     memcpy(wifi.ssid, bytes + 4, 33);
     memcpy(wifi.password, bytes + 37, 64);
+    if (!legacy) memcpy(wifi.controller_name, bytes + WIFI_LEGACY_BYTES, DEVICE_NAME_LEN);
     if (!wifi_valid(&wifi)) return ESP_ERR_INVALID_RESPONSE;
     *out = wifi;
     return ESP_OK;
@@ -94,10 +101,11 @@ static esp_err_t save_wifi_record(const device_wifi_credentials_t *credentials)
 {
     if (!wifi_valid(credentials)) return ESP_ERR_INVALID_ARG;
     uint8_t bytes[WIFI_BYTES] = {0};
-    put_u32(bytes, 1);
+    put_u32(bytes, 2);
     memcpy(bytes + 4, credentials->ssid, strlen(credentials->ssid));
     memcpy(bytes + 37, credentials->password, strlen(credentials->password));
-    return write_record("wifi_v1", bytes, sizeof(bytes));
+    memcpy(bytes + WIFI_LEGACY_BYTES, credentials->controller_name, strlen(credentials->controller_name));
+    return write_record("wifi_v2", bytes, sizeof(bytes));
 }
 
 esp_err_t device_config_seed_wifi(const device_wifi_credentials_t *seed)

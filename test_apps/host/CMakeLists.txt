@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 project(p1s_heat_host_tests C)
 
+add_executable(test_device_name test_device_name.c
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/device_config/device_name.c")
+target_include_directories(test_device_name PRIVATE stubs
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/device_config/include")
+target_compile_options(test_device_name PRIVATE -Wall -Wextra -Werror -pedantic)
+add_test(NAME device_name COMMAND test_device_name)
+
 add_executable(test_clock_service test_clock_service.c
     "${CMAKE_CURRENT_LIST_DIR}/../../components/clock_service/clock_service.c")
 target_include_directories(test_clock_service PRIVATE stubs
@@ -365,7 +372,7 @@ target_include_directories(test_wifi_manager PRIVATE wifi_stubs stubs
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/include"
 )
 target_compile_options(test_wifi_manager PRIVATE -Wall -Wextra -Werror -pedantic)
-foreach(scenario router association replacement failed_disconnect ip_lost
+foreach(scenario identity_default identity_collision identity_failure identity_invalid identity_ip identity_name_only identity_owner identity_reopen identity_temporary identity_public identity_blank router association replacement failed_disconnect ip_lost
     rssi_refresh rssi_rate rssi_failure rssi_ap_deadline rssi_other_network rssi_disconnect_race)
     add_test(NAME wifi_manager_${scenario} COMMAND test_wifi_manager ${scenario})
 endforeach()
@@ -383,7 +390,7 @@ target_include_directories(test_wifi_startup PRIVATE wifi_stubs stubs
     "${CMAKE_CURRENT_LIST_DIR}/../../components/runtime/include")
 target_compile_options(test_wifi_startup PRIVATE -Wall -Wextra -Werror -pedantic)
 foreach(scenario none nvs netif event_loop radio_init storage wifi_handler ip_handler
-    ap_mode ap_config sta_mode radio_start worker)
+    ap_mode ap_config sta_mode radio_start worker mdns_init mdns_hostname mdns_instance mdns_service)
     add_test(NAME wifi_startup_${scenario} COMMAND test_wifi_startup ${scenario})
 endforeach()
 
@@ -422,8 +429,14 @@ target_include_directories(test_chamber_http PRIVATE web_stubs printer_stubs stu
     "${CMAKE_CURRENT_LIST_DIR}/../../managed_components/espressif__cjson/cJSON")
 target_compile_options(test_chamber_http PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(test_chamber_http PRIVATE m)
-foreach(chamber_case json calibration origin timeout deadline sse sse_init
+foreach(chamber_case json calibration origin wifi_identity timeout deadline sse sse_init
     service_rejection service_timeout service_trickle service_final_chunk
     service_disconnect service_nul get_body final_chunk acknowledgement)
     add_test(NAME chamber_http_${chamber_case} COMMAND test_chamber_http ${chamber_case})
+endforeach()
+
+foreach(identity_target test_printer_control test_printer_api_policy test_device_config test_wifi_engine test_wifi_api_policy
+    test_wifi_manager test_wifi_startup test_chamber_http)
+    target_sources(${identity_target} PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/../../components/device_config/device_name.c")
 endforeach()

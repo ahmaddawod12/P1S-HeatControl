@@ -25,12 +25,6 @@ esp_err_t esp_wifi_init(const wifi_init_config_t *config)
 { (void)config; return UNAVAILABLE(); }
 esp_err_t esp_wifi_set_storage(int storage) { (void)storage; return UNAVAILABLE(); }
 esp_err_t esp_wifi_start(void) { return UNAVAILABLE(); }
-esp_err_t mdns_init(void) { return UNAVAILABLE(); }
-esp_err_t mdns_hostname_set(const char *name) { (void)name; return UNAVAILABLE(); }
-esp_err_t mdns_instance_name_set(const char *name) { (void)name; return UNAVAILABLE(); }
-esp_err_t mdns_service_add(const char *instance, const char *service, const char *proto,
-    unsigned port, const void *txt, unsigned count)
-{ (void)instance; (void)service; (void)proto; (void)port; (void)txt; (void)count; return UNAVAILABLE(); }
 esp_err_t device_config_init(void) { return UNAVAILABLE(); }
 esp_err_t device_config_load_wifi(device_wifi_credentials_t *out)
 { (void)out; return UNAVAILABLE(); }

@@ -19,8 +19,16 @@ static char s_published_ip[WIFI_MANAGER_IP_LEN];
 static esp_err_t s_ap_info_result;
 static const char *s_reported_ssid;
 static bool s_disconnect_during_query;
-static const wifi_credentials_t k_old = {"old network", "old-password"};
-static const wifi_credentials_t k_next = {"new network", "new-password"};
+static char s_test_hostname[DEVICE_HOSTNAME_LEN];
+static wifi_credentials_t s_saved_credentials;
+static unsigned s_save_calls;
+static esp_err_t s_save_result;
+static const char *s_occupied_names[3];
+static unsigned s_query_calls;
+static mdns_result_t s_query_result;
+static void (*s_during_name_query)(void);
+static const wifi_credentials_t k_old = {.ssid="old network", .password="old-password"};
+static const wifi_credentials_t k_next = {.ssid="new network", .password="new-password"};
 
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t lock, TickType_t wait)
@@ -34,7 +42,29 @@ int64_t esp_timer_get_time(void) { return (int64_t)s_test_now * 1000; }
 void app_runtime_set_network_status(int8_t rssi, const char *ip)
 { ++s_network_updates; s_published_rssi = rssi; strcpy(s_published_ip, ip); }
 esp_err_t device_config_save_wifi(const device_wifi_credentials_t *credentials)
-{ assert(credentials); return ESP_OK; }
+{ assert(credentials); ++s_save_calls; if (s_save_result==ESP_OK) s_saved_credentials=*credentials; return s_save_result; }
+esp_err_t mdns_init(void) { return ESP_OK; }
+esp_err_t mdns_hostname_set(const char *name)
+{ assert(name && strlen(name)<sizeof(s_test_hostname)); strcpy(s_test_hostname,name); return ESP_OK; }
+esp_err_t mdns_hostname_get(char *out)
+{ strcpy(out,s_test_hostname); return ESP_OK; }
+esp_err_t mdns_instance_name_set(const char *name) { assert(name); return ESP_OK; }
+esp_err_t mdns_service_add(const char *instance, const char *service, const char *proto,
+    unsigned port, const void *txt, unsigned count)
+{ assert(!instance && service && proto && port==80 && !txt && !count); return ESP_OK; }
+esp_err_t mdns_query(const char *name,const char *service,const char *proto,uint16_t type,
+    uint32_t timeout,size_t max,mdns_result_t **out)
+{
+    assert(!service && !proto && type==MDNS_TYPE_A && timeout==1000 && max>0);
+    assert(strcmp(name,s_test_hostname)!=0); /* Never advertise a candidate before checking ownership. */
+    if (s_during_name_query) s_during_name_query();
+    ++s_query_calls; *out=NULL;
+    for (unsigned i=0; i<3; ++i) if (s_occupied_names[i] && !strcmp(name,s_occupied_names[i])) {
+        s_query_result=(mdns_result_t){.esp_netif=s_sta_netif}; *out=&s_query_result;
+    }
+    return ESP_OK;
+}
+void mdns_query_results_free(mdns_result_t *out) { assert(!out || out==&s_query_result); }
 esp_err_t esp_wifi_set_mode(wifi_mode_t mode)
 { if (mode == WIFI_MODE_STA) ++s_ap_stops; return ESP_OK; }
 esp_err_t esp_wifi_get_config(int interface, wifi_config_t *config)
@@ -86,6 +116,15 @@ static void reset_fixture(bool radio_configured)
     s_lock = xSemaphoreCreateMutex();
     s_worker = (TaskHandle_t)1;
     s_storage_ready = true;
+    s_mdns_ready = false;
+    s_mdns_service_ready=false; s_name_preflight=false; s_name_network_connected=false;
+    s_candidate_hostname[0]=0; s_saved_name[0]=0;
+    /* Existing recovery scenarios isolate the radio worker from discovery. */
+    s_discovery_retry_at=UINT64_MAX;
+    s_save_result=ESP_OK; s_save_calls=0;
+    s_test_hostname[0]=0;
+    memset(s_occupied_names,0,sizeof(s_occupied_names)); s_query_calls=0;
+    s_during_name_query=NULL;
     s_pending = false;
     s_event = (network_event_t){0};
     atomic_store(&s_disconnect_epoch, 0);
@@ -284,6 +323,178 @@ static void signal_query_racing_disconnect_is_ignored(void)
     run_worker_at(36100);
     assert(!s_status.connected && s_status.rssi == 0);
 }
+static void default_name_is_probed_and_saved(void)
+{
+    reset_fixture(true);
+    assert(start_mdns()==ESP_OK);
+    assert(!s_test_hostname[0]);
+    run_worker_at(5000);
+    assert(s_save_calls==0); /* AP-only discovery cannot confirm the target LAN. */
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,5000);
+    run_worker_at(5000);
+    run_worker_at(7999);
+    assert(s_status.name_pending && s_save_calls==0);
+    run_worker_at(8000);
+    assert(!s_status.name_pending && s_save_calls==1);
+    assert(!strcmp(s_saved_credentials.controller_name,"1"));
+    run_worker_at(15000);
+    assert(s_save_calls==1);
+}
+static void collisions_use_and_persist_numeric_names(void)
+{
+    reset_fixture(true);
+    wifi_credentials_t named=k_old; strcpy(named.controller_name,"left");
+    wifi_engine_init(&s_engine,&named,ESP_OK,0);
+    assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0);
+    assert(!strcmp(s_test_hostname,"p1s-left"));
+    strcpy(s_test_hostname,"p1s-left-2"); /* mDNS's conflict negotiation lost. */
+    run_worker_at(100);
+    assert(!strcmp(s_test_hostname,"p1s-1") && s_save_calls==0);
+    strcpy(s_test_hostname,"p1s-2"); /* p1s-1 is occupied too. */
+    run_worker_at(200);
+    assert(!strcmp(s_test_hostname,"p1s-2"));
+    run_worker_at(3199); assert(s_save_calls==0 && s_status.name_pending);
+    run_worker_at(3200);
+    assert(s_save_calls==1 && !s_status.name_pending);
+    assert(!strcmp(s_status.controller_name,"2") && !strcmp(s_status.hostname,"p1s-2"));
+    assert(!strcmp(s_saved_credentials.controller_name,"2"));
+    assert(!strcmp(s_saved_credentials.ssid,k_old.ssid) && !strcmp(s_saved_credentials.password,k_old.password));
+    assert(!strcmp(s_status.requested_name,"left"));
+    strcpy(s_test_hostname,"p1s-3"); /* A conflict appearing after confirmation. */
+    run_worker_at(5000); assert(s_status.name_pending);
+    run_worker_at(8000);
+    assert(!strcmp(s_saved_credentials.controller_name,"3") && s_save_calls==2);
+}
+static void name_commit_failure_keeps_setup_available(void)
+{
+    reset_fixture(true); assert(start_mdns()==ESP_OK);
+    s_engine.status.ap_active=true;
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0);
+    s_save_result=ESP_FAIL;
+    run_worker_at(3000); run_worker_at(11000);
+    assert(s_status.name_pending && s_status.ap_active && s_status.result==WIFI_RESULT_SAVE_FAILED);
+    s_save_result=ESP_OK;
+    run_worker_at(12000);
+    assert(!s_status.name_pending && !strcmp(s_saved_credentials.controller_name,"1"));
+}
+static void invalid_names_are_rejected_before_saving(void)
+{
+    reset_fixture(true);
+    wifi_credentials_t invalid=k_next;
+    memset(invalid.controller_name,'x',sizeof(invalid.controller_name));
+    assert(wifi_manager_request_credentials(&invalid)==ESP_ERR_INVALID_ARG);
+    assert(s_save_calls==0 && !s_pending);
+}
+static void each_ip_event_restarts_name_confirmation(void)
+{
+    reset_fixture(true); assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0);
+    associated();
+    const ip_event_got_ip_t acquired={.ip_info.ip.addr=0x1700000a};
+    got_ip_event(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,(void *)&acquired);
+    run_worker_at(2500); run_worker_at(3000);
+    assert(s_status.name_pending && s_save_calls==0);
+    run_worker_at(5500);
+    assert(!s_status.name_pending && s_save_calls==1);
+}
+static void name_only_change_and_failed_save_preserve_network(void)
+{
+    reset_fixture(true); assert(start_mdns()==ESP_OK);
+    wifi_credentials_t named=k_old; strcpy(named.controller_name,"left");
+    assert(wifi_manager_request_credentials(&named)==ESP_OK);
+    run_worker_at(250);
+    assert(s_status.name_pending && !s_status.hostname[0]);
+    associated();
+    const ip_event_got_ip_t acquired={.ip_info.ip.addr=0x1600000a};
+    got_ip_event(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,(void *)&acquired);
+    run_worker_at(300);
+    assert(!strcmp(s_test_hostname,"p1s-left"));
+    assert(!strcmp(s_status.ssid,k_old.ssid) && !strcmp(s_status.requested_name,"left"));
+    assert(!strcmp(s_saved_credentials.controller_name,"left"));
+    strcpy(named.controller_name,"right"); s_save_result=ESP_FAIL;
+    assert(wifi_manager_request_credentials(&named)==ESP_OK);
+    run_worker_at(550);
+    assert(!strcmp(s_test_hostname,"p1s-left") && !strcmp(s_status.controller_name,"left"));
+    assert(!strcmp(s_status.ssid,k_old.ssid) && s_status.result==WIFI_RESULT_SAVE_FAILED);
+    assert(!strcmp(s_saved_credentials.controller_name,"left"));
+}
+static void an_existing_owner_is_checked_before_claiming(void)
+{
+    reset_fixture(true);
+    wifi_credentials_t named=k_old; strcpy(named.controller_name,"left");
+    wifi_engine_init(&s_engine,&named,ESP_OK,0);
+    s_occupied_names[0]="p1s-left"; s_occupied_names[1]="p1s-1";
+    assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.250",-40,0);
+    run_worker_at(0); run_worker_at(100); run_worker_at(200); run_worker_at(3200);
+    assert(s_query_calls>=3 && !strcmp(s_saved_credentials.controller_name,"2"));
+    assert(!strcmp(s_status.hostname,"p1s-2") && !s_status.name_pending);
+}
+static void a_late_conflict_reopens_setup(void)
+{
+    reset_fixture(true); assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0); run_worker_at(3000);
+    assert(!s_status.ap_active);
+    strcpy(s_test_hostname,"p1s-2"); s_save_result=ESP_FAIL;
+    run_worker_at(5000); run_worker_at(5100); run_worker_at(8100);
+    assert(s_status.ap_active && s_status.name_pending && s_status.result==WIFI_RESULT_SAVE_FAILED);
+    s_save_result=ESP_OK; run_worker_at(9100);
+    assert(!s_status.name_pending && s_status.ap_active);
+    run_worker_at(19100); run_worker_at(19200);
+    assert(!s_status.ap_active); /* Recovery must not leave an endless reopen flag. */
+}
+static void a_valid_name_cannot_equal_the_temporary_identity(void)
+{
+    reset_fixture(true);
+    wifi_credentials_t named=k_old; strcpy(named.controller_name,"check-10-0-0-22");
+    wifi_engine_init(&s_engine,&named,ESP_OK,0);
+    s_occupied_names[0]="p1s-check-10-0-0-22";
+    assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0); run_worker_at(100); run_worker_at(3100);
+    assert(!s_status.name_pending && !strcmp(s_saved_credentials.controller_name,"1"));
+}
+static void expect_public_name_is_pending(void)
+{
+    wifi_manager_status_t status;
+    wifi_manager_get_status(&status);
+    assert(status.name_pending && !status.hostname[0]);
+}
+static void ownership_checks_never_expose_the_temporary_hostname(void)
+{
+    reset_fixture(true);
+    wifi_credentials_t named=k_old; strcpy(named.controller_name,"left");
+    wifi_engine_init(&s_engine,&named,ESP_OK,0);
+    assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0); run_worker_at(3000);
+    assert(!strcmp(s_status.hostname,"p1s-left") && !s_status.name_pending);
+    s_during_name_query=expect_public_name_is_pending;
+    associated();
+    const ip_event_got_ip_t ip={.ip_info.ip.addr=0x1600000a};
+    got_ip_event(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,(void *)&ip);
+    run_worker_at(4000); run_worker_at(7000);
+    assert(!strcmp(s_status.hostname,"p1s-left") && !s_status.name_pending);
+    strcpy(s_test_hostname,"p1s-left-2");
+    run_worker_at(8000); run_worker_at(11000);
+    assert(!strcmp(s_status.hostname,"p1s-1") && !s_status.name_pending);
+}
+static void blank_name_skips_an_occupied_first_number(void)
+{
+    reset_fixture(true);
+    s_occupied_names[0]="p1s-1";
+    assert(start_mdns()==ESP_OK);
+    wifi_engine_connected(&s_engine,k_old.ssid,"10.0.0.22",-40,0);
+    run_worker_at(0); run_worker_at(100); run_worker_at(3100);
+    assert(!s_status.name_pending && !strcmp(s_status.hostname,"p1s-2"));
+    assert(!strcmp(s_saved_credentials.controller_name,"2"));
+    assert(!strcmp(s_status.requested_name,""));
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -294,7 +505,18 @@ int main(int argc, char **argv)
         assert(!status.can_save && wifi_manager_request_credentials(&k_next)==ESP_ERR_NOT_ALLOWED);
         service_operation_end(owner);
     }
-    if (strcmp(argv[1], "router") == 0) router_disconnect_before_dhcp_retries();
+    if (strcmp(argv[1], "identity_default") == 0) default_name_is_probed_and_saved();
+    else if (strcmp(argv[1], "identity_collision") == 0) collisions_use_and_persist_numeric_names();
+    else if (strcmp(argv[1], "identity_failure") == 0) name_commit_failure_keeps_setup_available();
+    else if (strcmp(argv[1], "identity_invalid") == 0) invalid_names_are_rejected_before_saving();
+    else if (strcmp(argv[1], "identity_ip") == 0) each_ip_event_restarts_name_confirmation();
+    else if (strcmp(argv[1], "identity_name_only") == 0) name_only_change_and_failed_save_preserve_network();
+    else if (strcmp(argv[1], "identity_owner") == 0) an_existing_owner_is_checked_before_claiming();
+    else if (strcmp(argv[1], "identity_reopen") == 0) a_late_conflict_reopens_setup();
+    else if (strcmp(argv[1], "identity_temporary") == 0) a_valid_name_cannot_equal_the_temporary_identity();
+    else if (strcmp(argv[1], "identity_public") == 0) ownership_checks_never_expose_the_temporary_hostname();
+    else if (strcmp(argv[1], "identity_blank") == 0) blank_name_skips_an_occupied_first_number();
+    else if (strcmp(argv[1], "router") == 0) router_disconnect_before_dhcp_retries();
     else if (strcmp(argv[1], "association") == 0) association_clears_an_unreported_local_disconnect();
     else if (strcmp(argv[1], "replacement") == 0) credential_change_consumes_only_its_own_disconnect();
     else if (strcmp(argv[1], "failed_disconnect") == 0) failed_disconnect_does_not_mask_router_failure();

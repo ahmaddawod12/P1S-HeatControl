@@ -8,6 +8,7 @@ static void set_credentials(wifi_engine_t *e,const wifi_credentials_t *c)
 {
     memcpy(e->status.ssid,c->ssid,sizeof(c->ssid));
     memcpy(e->status.password,c->password,sizeof(c->password));
+    memcpy(e->status.controller_name,c->controller_name,sizeof(c->controller_name));
     e->status.configured=true;
 }
 void wifi_engine_init(wifi_engine_t *e,const wifi_credentials_t *c,esp_err_t error,uint64_t now)
@@ -55,9 +56,10 @@ void wifi_engine_disconnected(wifi_engine_t *e,wifi_result_t result,uint64_t now
 }
 static esp_err_t connect(wifi_engine_t *e,uint64_t now,const wifi_engine_ops_t *o)
 {
-    wifi_credentials_t c;
+    wifi_credentials_t c={0};
     memcpy(c.ssid,e->status.ssid,sizeof(c.ssid));
     memcpy(c.password,e->status.password,sizeof(c.password));
+    memcpy(c.controller_name,e->status.controller_name,sizeof(c.controller_name));
     e->retry_at=UINT64_MAX;
     const esp_err_t err=o->connect(&c,o->ctx);
     if (err!=ESP_OK) wifi_engine_disconnected(e,WIFI_RESULT_DRIVER_FAILED,now);
@@ -66,7 +68,8 @@ static esp_err_t connect(wifi_engine_t *e,uint64_t now,const wifi_engine_ops_t *
 esp_err_t wifi_engine_apply(wifi_engine_t *e,const wifi_credentials_t *c,uint64_t now,const wifi_engine_ops_t *o)
 {
     if (!e->storage_ready) return ESP_ERR_INVALID_STATE;
-    if (!c || !wifi_credentials_are_valid_n(c->ssid,sizeof(c->ssid),c->password,sizeof(c->password)))
+    if (!c || !wifi_credentials_are_valid_n(c->ssid,sizeof(c->ssid),c->password,sizeof(c->password)) ||
+        !device_name_valid_n(c->controller_name,sizeof(c->controller_name)))
         return ESP_ERR_INVALID_ARG;
     e->close_ap_at=UINT64_MAX;
     esp_err_t err=set_ap(e,true,now,o);

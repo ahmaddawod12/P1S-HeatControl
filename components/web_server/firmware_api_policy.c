@@ -18,10 +18,12 @@ static bool authority(const char *host, const char *name, uint16_t port)
     const int length = snprintf(with_port, sizeof(with_port), "%s:%u", name, port);
     return length > 0 && length < (int) sizeof(with_port) && equal_host(host, with_port);
 }
-bool firmware_request_origin_valid(const char *host, const char *origin, const char *local_ip, uint16_t port)
+bool firmware_request_origin_valid(const char *host, const char *origin, const char *local_ip,
+    uint16_t port, const char *local_hostname)
 {
     if (!host || !origin || !local_ip || !port || strlen(host) >= 80 ||
-        (!authority(host, local_ip, port) && !authority(host, "p1s-heat.local", port))) return false;
+        (!authority(host, local_ip, port) && (!local_hostname || !local_hostname[0] ||
+            !authority(host, local_hostname, port)))) return false;
     char expected[88];
     snprintf(expected, sizeof(expected), "http://%s", host);
     return equal_host(expected, origin);

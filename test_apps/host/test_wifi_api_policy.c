@@ -7,6 +7,12 @@ static bool parse(const char *s,wifi_credentials_t *out) { return wifi_request_p
 int main(void)
 {
     wifi_credentials_t out;
+    /* A named setup is still a flat credential request, with one optional field. */
+    assert(parse("{\"ssid\":\"home\",\"password\":\"12345678\",\"controller_name\":\" Left-1 \"}",&out));
+    assert(strcmp(out.ssid,"home")==0);
+    assert(strcmp(out.controller_name,"left-1")==0);
+    assert(parse("{\"ssid\":\"home\",\"password\":\"12345678\",\"controller_name\":\"\"}",&out));
+    assert(out.controller_name[0]==0);
     assert(parse(" \n{\"ssid\":\" space \",\"password\":\" pass\\\\word\\\" \"}\t",&out));
     assert(strcmp(out.ssid," space ")==0 && strcmp(out.password," pass\\word\" ")==0);
     assert(parse("{\"password\":\"\",\"ssid\":\"open\"}",&out) && out.password[0]==0);
@@ -15,6 +21,13 @@ int main(void)
     assert(parse("{\"ssid\":\"literal\\\\u0000\",\"password\":\"12345678\"}",&out));
     assert(strcmp(out.ssid,"literal\\u0000")==0);
     static const char *invalid[]={
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":\"left.local\"}",
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":\"two words\"}",
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":\"-left\"}",
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":\"abcdefghijklmnopqrstuvw\"}",
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":\"left\",\"controller_name\":\"right\"}",
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":null}",
+        "{\"ssid\":\"x\",\"password\":\"12345678\",\"controller_name\":\"left\\u0000extra\"}",
         "{}", "[]", "null", "{\"ssid\":\"x\"}",
         "{\"ssid\":\"x\",\"password\":\"12345678\",\"extra\":1}",
         "{\"ssid\":\"x\",\"ssid\":\"y\",\"password\":\"12345678\"}",

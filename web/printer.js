@@ -86,7 +86,9 @@
       if (!snapshot || !snapshot.monitor || typeof snapshot.csrf_token !== 'string') throw new Error('printer status');
       if (!status) el.settings.open = !snapshot.configured;
       status = snapshot; online = snapshot.reason !== 'unavailable';
-      if (savePending && !snapshot.applying) {
+      /* A poll begun before a settings request settles may still contain the
+       * previous operation's terminal status, even if its reply arrives later. */
+      if (savePending && !requestedDuringSave && !saving && online && !snapshot.applying) {
         var matches = snapshot.ipv4 === savePending.ipv4 && snapshot.serial === savePending.serial &&
           snapshot.enabled === savePending.enabled;
         if (snapshot.config_result === 'saved' && matches && !configUncertain) {
@@ -95,8 +97,6 @@
         else if (!matches && !configUncertain) error = 'Saved settings changed in another request. Your draft is kept; review the connection.';
         savePending = null;
       }
-      /* A poll begun before DELETE settles may still contain the previous
-       * operation's terminal status, even if its reply arrives after DELETE. */
       if (forgetPending && !requestedDuringSave && !saving && online && !snapshot.applying) {
         if (snapshot.config_result === 'saved' && !snapshot.configured) {
           if (sameDraft(forgetPending)) { dirty = false; el.code.value = ''; }

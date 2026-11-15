@@ -21,6 +21,10 @@ static esp_err_t get_wifi(httpd_req_t *req)
     if (!root) return respond(req,"503 Service Unavailable","{\"error\":\"memory\"}");
     cJSON_AddStringToObject(root,"ssid",s.ssid);
     cJSON_AddStringToObject(root,"password",s.password);
+    cJSON_AddStringToObject(root,"controller_name",s.controller_name);
+    cJSON_AddStringToObject(root,"requested_name",s.requested_name);
+    cJSON_AddStringToObject(root,"hostname",s.hostname);
+    cJSON_AddBoolToObject(root,"name_pending",s.name_pending);
     cJSON_AddStringToObject(root,"ip_addr",s.ip_addr);
     cJSON_AddNumberToObject(root,"rssi",s.rssi);
     cJSON_AddBoolToObject(root,"configured",s.configured);

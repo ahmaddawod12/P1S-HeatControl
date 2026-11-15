@@ -10,7 +10,7 @@ TEST_CASE("optional printer record survives reload and clear preserves Wi-Fi", "
     TEST_ESP_OK(device_config_init());
     TEST_ESP_OK(device_config_clear_printer());
     printer_connection_config_t p={.enabled=true,.ipv4="192.168.1.9",.serial="TEST123",.access_code="test-code"}, got;
-    device_wifi_credentials_t wifi={"fixture","fixture-password"}, saved;
+    device_wifi_credentials_t wifi={.ssid="fixture", .password="fixture-password"}, saved;
     TEST_ESP_OK(device_config_save_wifi(&wifi));
     TEST_ESP_OK(device_config_save_printer(&p));
     TEST_ESP_OK(device_config_init());
@@ -28,7 +28,7 @@ TEST_CASE("saved Wi-Fi survives generic firmware and attempt updates", "[device_
     (void) nvs_flash_deinit_partition("device_cfg");
     TEST_ESP_OK(nvs_flash_erase_partition("device_cfg"));
     TEST_ESP_OK(device_config_init());
-    device_wifi_credentials_t seed = {"fixture-network", "fixture-password"}, got;
+    device_wifi_credentials_t seed = {.ssid="fixture-network", .password="fixture-password"}, got;
     TEST_ESP_OK(device_config_seed_wifi(&seed));
     device_wifi_credentials_t empty = {0};
     TEST_ESP_OK(device_config_seed_wifi(&empty));
@@ -54,6 +54,8 @@ TEST_CASE("saved Wi-Fi survives generic firmware and attempt updates", "[device_
 
 TEST_CASE("future device record cannot be erased or reseeded", "[device_config]")
 {
+    (void) nvs_flash_deinit_partition("device_cfg");
+    TEST_ESP_OK(nvs_flash_erase_partition("device_cfg"));
     TEST_ESP_OK(device_config_init());
     nvs_handle_t handle;
     TEST_ESP_OK(nvs_open_from_partition("device_cfg", "p1s_device", NVS_READWRITE, &handle));
@@ -61,7 +63,7 @@ TEST_CASE("future device record cannot be erased or reseeded", "[device_config]"
     TEST_ESP_OK(nvs_set_blob(handle, "wifi_v1", future, sizeof(future)));
     TEST_ESP_OK(nvs_commit(handle));
     nvs_close(handle);
-    device_wifi_credentials_t seed = {"replacement", "replacement-password"};
+    device_wifi_credentials_t seed = {.ssid="replacement", .password="replacement-password"};
     TEST_ASSERT_NOT_EQUAL(ESP_OK, device_config_seed_wifi(&seed));
     TEST_ASSERT_NOT_EQUAL(ESP_OK, device_config_save_wifi(&seed));
     TEST_ESP_OK(nvs_open_from_partition("device_cfg", "p1s_device", NVS_READONLY, &handle));
@@ -78,8 +80,8 @@ TEST_CASE("Wi-Fi replacement preserves exact text and survives restart", "[devic
     (void)nvs_flash_deinit_partition("device_cfg");
     TEST_ESP_OK(nvs_flash_erase_partition("device_cfg"));
     TEST_ESP_OK(device_config_init());
-    device_wifi_credentials_t first={"first", "first-password"};
-    device_wifi_credentials_t next={" spaced network ", " visible password "}, got;
+    device_wifi_credentials_t first={.ssid="first", .password="first-password"};
+    device_wifi_credentials_t next={.ssid=" spaced network ", .password=" visible password ", .controller_name="left"}, got;
     TEST_ESP_OK(device_config_seed_wifi(&first));
     TEST_ESP_OK(device_config_save_wifi(&next));
     TEST_ESP_OK(nvs_flash_deinit_partition("device_cfg"));
@@ -87,6 +89,7 @@ TEST_CASE("Wi-Fi replacement preserves exact text and survives restart", "[devic
     TEST_ESP_OK(device_config_load_wifi(&got));
     TEST_ASSERT_EQUAL_STRING(next.ssid, got.ssid);
     TEST_ASSERT_EQUAL_STRING(next.password, got.password);
+    TEST_ASSERT_EQUAL_STRING("left", got.controller_name);
     TEST_ESP_OK(nvs_flash_deinit_partition("device_cfg"));
     TEST_ESP_OK(nvs_flash_erase_partition("device_cfg"));
 }

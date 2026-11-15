@@ -16,7 +16,7 @@ static esp_err_t ap(bool enabled,void *ctx)
 static esp_err_t connect(const wifi_credentials_t *c,void *ctx)
 { fixture_t *f=ctx; ++f->connects; record(f,'C'); f->requested=*c; return f->connect_result; }
 static wifi_engine_ops_t ops(fixture_t *f) { return (wifi_engine_ops_t){.save=save,.set_ap=ap,.connect=connect,.ctx=f}; }
-static const wifi_credentials_t old={"old network", "old-password"};
+static const wifi_credentials_t old={.ssid="old network", .password="old-password"};
 
 static void no_credentials_and_storage_error(void)
 {
@@ -61,7 +61,7 @@ static void grace_is_cancelled_and_deferred(void)
 static void exact_replacement_and_stale_ip(void)
 {
     fixture_t f={0}; wifi_engine_t e; wifi_engine_ops_t o=ops(&f);
-    wifi_credentials_t next={" new network ", " password\\with spaces "};
+    wifi_credentials_t next={.ssid=" new network ", .password=" password\\with spaces "};
     wifi_engine_init(&e,&old,ESP_OK,0);
     assert(wifi_engine_apply(&e,&next,250,&o)==ESP_OK);
     assert(strcmp(f.trace,"ASC")==0);
@@ -72,21 +72,21 @@ static void exact_replacement_and_stale_ip(void)
     assert(!e.status.connected);
     wifi_engine_connected(&e,next.ssid,"10.0.0.23",-44,600);
     assert(e.status.connected && strcmp(e.status.ip_addr,"10.0.0.23")==0);
-    next=(wifi_credentials_t){"open network", ""};
+    next=(wifi_credentials_t){.ssid="open network", .password=""};
     assert(wifi_engine_apply(&e,&next,700,&o)==ESP_OK);
     assert(f.saved.password[0]==0);
 }
 static void failed_ap_or_commit_keeps_old_configuration(void)
 {
-    fixture_t f={.saved={"old network","old-password"},.ap_result=ESP_FAIL};
+    fixture_t f={.saved={.ssid="old network", .password="old-password"},.ap_result=ESP_FAIL};
     wifi_engine_t e; wifi_engine_ops_t o=ops(&f);
-    wifi_credentials_t next={"new", "new-password"};
+    wifi_credentials_t next={.ssid="new", .password="new-password"};
     wifi_engine_init(&e,&old,ESP_OK,0);
     wifi_engine_connected(&e,old.ssid,"10.0.0.22",-50,0);
     assert(wifi_engine_apply(&e,&next,0,&o)!=ESP_OK);
     assert(strcmp(f.trace,"A")==0 && e.status.connected);
     assert(strcmp(e.status.ssid,old.ssid)==0 && e.status.result==WIFI_RESULT_AP_FAILED);
-    f=(fixture_t){.saved={"old network","old-password"},.save_result=ESP_FAIL};
+    f=(fixture_t){.saved={.ssid="old network", .password="old-password"},.save_result=ESP_FAIL};
     assert(wifi_engine_apply(&e,&next,1,&o)==ESP_FAIL);
     assert(strcmp(f.trace,"AS")==0 && e.status.ap_active && e.status.connected);
     assert(strcmp(f.saved.ssid,old.ssid)==0 && e.status.result==WIFI_RESULT_SAVE_FAILED);
@@ -94,7 +94,7 @@ static void failed_ap_or_commit_keeps_old_configuration(void)
 static void wrong_network_and_driver_error_remain_recoverable(void)
 {
     fixture_t f={.connect_result=ESP_FAIL}; wifi_engine_t e; wifi_engine_ops_t o=ops(&f);
-    wifi_credentials_t wrong={"wrong network", "wrong-password"};
+    wifi_credentials_t wrong={.ssid="wrong network", .password="wrong-password"};
     wifi_engine_init(&e,&old,ESP_OK,0);
     assert(wifi_engine_apply(&e,&wrong,0,&o)==ESP_FAIL);
     assert(e.status.ap_active && !e.status.connected && strcmp(f.saved.ssid,wrong.ssid)==0);

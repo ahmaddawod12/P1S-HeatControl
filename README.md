@@ -201,21 +201,33 @@ diagnosis.
 The controller joins the network saved in the dedicated
 `device_cfg` NVS partition, reconnects with 1, 2, 4, 8, then 30-second
 backoff for as long as the router stays away, and advertises `_http._tcp` on
-port 80 as `p1s-heat.local`.
+port 80 at its saved `p1s-<name>.local` address.
 
 Use **Wi-Fi settings** in the dashboard to view and edit the saved network name
 and password as plain text. **Save & Connect** saves the exact text, including
 spaces, and connects immediately without restarting. Leave the password empty
-for an open network. Wi-Fi changes and firmware updates run one at a time.
+for an open network. The optional **Controller name** field previews the
+address: `left` becomes `http://p1s-left.local/`. Names accept up to 22 letters,
+numbers, or internal hyphens; surrounding whitespace is trimmed and letters
+are saved in lowercase. An empty name starts at `p1s-1.local`.
+Wi-Fi changes and firmware updates run one at a time.
+
+On the selected network, mDNS checks the name for conflicts. If a custom name
+is taken, the controller tries `p1s-1.local`, `p1s-2.local`, and so on. After
+confirmation it saves the final name and displays the actual link. Reboots
+and OTA updates retain that name; later conflicts trigger another check and
+save. Existing Wi-Fi credentials are retained when upgrading.
 
 With no saved credentials, the open **P1S-Heat-Setup** hotspot starts immediately.
 If a saved network cannot be reached, it starts after 30 seconds while station
 retries continue. Join that hotspot and open **http://192.168.4.1/** for the same
 dashboard. Incorrect credentials leave setup access available for correction.
 After connection succeeds, rejoin your normal Wi-Fi and use the displayed
-controller address; the hotspot closes 10 seconds after connection.
+controller address; the hotspot closes 10 seconds after the address is confirmed.
 If the address changed before your browser learned it, join your new Wi-Fi and
-open `http://p1s-heat.local/`. That discovery link stays visible in the page.
+open the discovery link shown in Wi-Fi settings. During a name-only change,
+the IP link stays available. If the name was taken before the browser learned
+the numbered address, reopen setup to read the final name.
 
 A personal USB bootstrap can still seed credentials once from
 `sdkconfig.secret`. Existing saved credentials take precedence; normal OTA

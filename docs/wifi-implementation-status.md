@@ -1,5 +1,30 @@
 # Wi-Fi configuration and fallback hotspot
 
+## Controller names (2026-11-15)
+
+The existing setup hotspot remains `P1S-Heat-Setup`. Wi-Fi settings adds an
+optional controller name and address preview. `left` requests
+`p1s-left.local`; blank starts at `p1s-1.local`. A conflict detected by mDNS
+negotiation tries numbered names in sequence, then persists the final name
+with the Wi-Fi credentials. The dashboard shows the actual address, and
+origin/CSRF enforcement accepts only that board's hostname or its local IP.
+
+Wi-Fi records now use `wifi_v2`, including the controller name; legacy
+`wifi_v1` credentials still load. Requested settings are saved atomically
+before reconnecting. Final names are confirmed after a three-second stable
+period on the station network and saved when changed. A one-second ownership
+query precedes claiming each candidate so an existing owner is preserved;
+subsequent probing handles simultaneous claims. Discovery retries run in the
+Wi-Fi worker and keep setup available if initialization or storage fails.
+Late conflicts reopen setup. Every station IP event restarts this check.
+The hotspot stays open through confirmation and ten more seconds.
+
+Source verification and two-board radio checks for this change are tracked
+in `docs/superpowers/plans/2026-11-15-controller-names.md`. The historical
+results below describe earlier firmware and are retained as recorded.
+
+## Original Wi-Fi implementation
+
 Implemented for version 1.0.5 in the existing checkout. The dashboard shows the
 stored SSID and password as editable plain text, as requested. Save persists the
 exact strings and connects without restarting. Missing credentials start the

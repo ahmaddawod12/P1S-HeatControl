@@ -10,7 +10,9 @@ const flush = async () => { for (let i = 0; i < 6; i++) await new Promise(setImm
 function browser(initial = {}) {
   const nodes = new Map(), timers = new Map(), calls = [], busy = [];
   let sequence = 0, offline = false, loseReply = false, reply = 202;
+  let putWait = null, releasePut = null, getWait = null, releaseGet = null;
   let wifi = {ssid: 'saved network', password: 'visible password', configured: true, connected: true,
+    controller_name: 'left', requested_name: 'left', hostname: 'p1s-left', name_pending: false,
     applying: false, can_save: true, ap_active: false, ap_ssid: 'P1S-Heat-Setup',
     ap_ip: '192.168.4.1', ip_addr: '10.0.0.31', result: 'connected', csrf_token: 'token-one', ...initial};
   const element = id => {
@@ -27,19 +29,27 @@ function browser(initial = {}) {
     fetch: async (url, options = {}) => {
       calls.push({url, options});
       if (options.method === 'PUT') {
+        if (putWait) await putWait;
         if (loseReply) throw Error('response lost');
         if (reply === 202) wifi = {...wifi, applying: true, can_save: false};
         return {ok: reply === 202, status: reply};
       }
       if (offline) throw Error('offline');
-      return {ok: true, json: async () => ({...wifi})};
+      const snapshot = {...wifi};
+      if (getWait) await getWait;
+      return {ok: true, json: async () => snapshot};
     }};
   context.window = context;
   vm.runInNewContext(source, context, {filename: 'wifi.js'});
   return {element, calls, busy, setWifi(v) {wifi = {...wifi, ...v};},
+    holdPut() {putWait = new Promise(resolve => {releasePut = resolve;});},
+    releasePut() {putWait = null; releasePut();},
+    holdGet() {getWait = new Promise(resolve => {releaseGet = resolve;});},
+    releaseGet() {getWait = null; releaseGet();},
     offline(v) {offline = v;}, loseReply(v) {loseReply = v;}, reply(v) {reply = v;},
-    edit(ssid, password) {
+    edit(ssid, password, name) {
       element('wifi-ssid').value = ssid; element('wifi-password').value = password;
+      if (name !== undefined) element('wifi-controller-name').value = name;
       element('wifi-ssid').listeners.input();
     },
     submit() {element('wifi-form').listeners.submit({preventDefault() {}});},
@@ -72,7 +82,7 @@ test('Save sends exact text once and immediately disables duplicate submission',
   await flush();
   const saves = b.calls.filter(c => c.options.method === 'PUT');
   assert.equal(saves.length, 1);
-  assert.deepEqual(JSON.parse(saves[0].options.body), {ssid: ' next ', password: ' password\\with spaces '});
+  assert.deepEqual(JSON.parse(saves[0].options.body), {ssid: ' next ', password: ' password\\with spaces ', controller_name: 'left'});
   assert.equal(saves[0].options.headers['X-P1S-CSRF'], 'token-one');
   assert.equal(saves[0].url, '/api/wifi');
 });
@@ -148,9 +158,124 @@ test('a successful unseen network change retains a discovery address after the A
   const b = browser(); await flush(); b.edit('new network', 'new password'); b.submit();
   b.offline(true); await flush(); await b.poll();
   assert.equal(b.element('wifi-station-link').hidden, true);
-  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-heat.local/');
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-left.local/');
   assert.equal(b.element('wifi-discovery-link').hidden, false);
   assert.match(b.element('wifi-message').textContent, /normal Wi-Fi|new Wi-Fi/i);
   assert.match(b.element('wifi-message').textContent, /hotspot.*closed|hotspot.*closes/i);
   assert.doesNotMatch(b.element('wifi-message').textContent, /saved address below/i);
+});
+
+test('saved controller name is editable and polling preserves its draft', async () => {
+  const b = browser(); await flush();
+  assert.equal(b.element('wifi-controller-name').value, 'left');
+  b.edit('saved network', 'visible password', 'right'); await b.poll();
+  assert.equal(b.element('wifi-controller-name').value, 'right');
+  assert.match(b.element('wifi-name-preview').textContent, /http:\/\/p1s-right\.local\//);
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-left.local/');
+});
+
+test('blank name previews the first numbered address', async () => {
+  const b = browser(); await flush(); b.edit('saved network', 'visible password', '');
+  assert.match(b.element('wifi-name-preview').textContent, /p1s-1\.local/);
+});
+
+test('name-only saves normalize the name and retain the IP recovery link', async () => {
+  const b = browser(); await flush(); b.edit('saved network', 'visible password', ' Right-2 ');
+  b.submit(); await flush();
+  const saves = b.calls.filter(c => c.options.method === 'PUT');
+  assert.equal(saves.length, 1);
+  assert.deepEqual(JSON.parse(saves[0].options.body), {
+    ssid: 'saved network', password: 'visible password', controller_name: 'right-2'});
+  assert.equal(b.element('wifi-station-link').hidden, false);
+  assert.equal(b.element('wifi-station-link').href, 'http://10.0.0.31/');
+});
+
+test('invalid names have an inline error and cannot be saved', async () => {
+  for (const name of ['two words', '-left', 'left-', 'left.local', 'a/b', 'é', 'x'.repeat(23)]) {
+    const b = browser(); await flush(); b.edit('saved network', 'visible password', name);
+    b.submit(); await flush();
+    assert.equal(b.calls.filter(c => c.options.method === 'PUT').length, 0);
+    assert.equal(b.element('wifi-name-error').hidden, false);
+    assert.equal(b.element('wifi-controller-name')['aria-invalid'], 'true');
+  }
+});
+
+test('name confirmation keeps Save busy until the final numbered address is returned', async () => {
+  const b = browser(); await flush(); b.submit(); await flush();
+  b.setWifi({applying: false, can_save: true, controller_name: '1', hostname: 'p1s-1', name_pending: true});
+  await b.poll();
+  assert.equal(b.element('wifi-save-button').disabled, true);
+  assert.match(b.element('wifi-message').textContent, /checking|confirming/i);
+  b.setWifi({controller_name: '2', hostname: 'p1s-2', name_pending: false}); await b.poll();
+  assert.equal(b.element('wifi-save-button').disabled, false);
+  assert.equal(b.element('wifi-controller-name').value, '2');
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-2.local/');
+  assert.equal(b.element('wifi-discovery-link').textContent, 'p1s-2.local');
+});
+
+test('a newer name draft survives confirmation of an older save', async () => {
+  const b = browser(); await flush(); b.submit(); await flush();
+  b.edit('saved network', 'visible password', 'new-draft');
+  b.setWifi({applying: false, can_save: true, controller_name: '1', hostname: 'p1s-1', name_pending: false});
+  await b.poll();
+  assert.equal(b.element('wifi-controller-name').value, 'new-draft');
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-1.local/');
+});
+
+test('lost rename reply retains the proposed address and unchanged setup hotspot', async () => {
+  const b = browser(); await flush(); b.loseReply(true); b.offline(true);
+  b.edit('saved network', 'visible password', 'right'); b.submit(); await flush(); await b.poll();
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-right.local/');
+  assert.match(b.element('wifi-message').textContent, /P1S-Heat-Setup/);
+  assert.match(b.element('wifi-message').textContent, /192\.168\.4\.1/);
+  assert.equal(b.calls.filter(c => c.options.method === 'PUT').length, 1);
+});
+
+test('discovery failure leaves Wi-Fi settings and IP recovery usable', async () => {
+  const b = browser(); await flush(); b.submit(); await flush();
+  b.setWifi({applying: false, can_save: true, connected: true, name_pending: true, result: 'driver_failed'});
+  await b.poll();
+  assert.equal(b.element('wifi-save-button').disabled, false);
+  assert.equal(b.element('wifi-station-link').hidden, false);
+  assert.match(b.element('wifi-message').textContent, /address.*retry|retry.*address/i);
+});
+
+test('a poll during Save cannot discard the requested hostname before a lost reply', async () => {
+  const b = browser({ap_active: true}); await flush();
+  b.holdPut(); b.edit('new network', 'new password', 'right'); b.submit(); await flush();
+  await b.poll();
+  b.setWifi({ssid: 'new network', password: 'new password', controller_name: 'right',
+    requested_name: 'right', hostname: 'p1s-right'});
+  b.offline(true); b.loseReply(true); b.releasePut(); await flush(); await b.poll();
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-right.local/');
+  assert.match(b.element('wifi-message').textContent, /p1s-right\.local/);
+  assert.equal(b.element('wifi-controller-name').value, 'right');
+  assert.equal(b.calls.filter(c => c.options.method === 'PUT').length, 1);
+});
+
+test('a GET begun during Save cannot confirm it after the PUT reply arrives', async () => {
+  const b = browser({controller_name: '2', requested_name: 'left', hostname: 'p1s-2'}); await flush();
+  b.holdPut(); b.edit('saved network', 'visible password', 'left'); b.submit(); await flush();
+  b.holdGet(); await b.poll();
+  b.releasePut(); await flush();
+  b.releaseGet(); await flush();
+  assert.equal(b.element('wifi-controller-name').value, 'left');
+  assert.equal(b.element('wifi-save-button').disabled, true);
+  b.setWifi({controller_name: 'left', requested_name: 'left', hostname: 'p1s-left',
+    applying: false, can_save: true, name_pending: false});
+  await b.poll();
+  assert.equal(b.element('wifi-controller-name').value, 'left');
+  assert.equal(b.element('wifi-discovery-link').href, 'http://p1s-left.local/');
+  assert.equal(b.element('wifi-save-button').disabled, false);
+});
+
+test('an old matching status cannot erase a rename draft before Save rejection', async () => {
+  const b = browser({controller_name: '2', requested_name: 'left', hostname: 'p1s-2'}); await flush();
+  b.holdPut(); b.edit('saved network', 'visible password', 'left'); b.submit(); await flush();
+  await b.poll();
+  b.reply(503); b.releasePut(); await flush();
+  assert.equal(b.element('wifi-controller-name').value, 'left');
+  assert.equal(b.element('wifi-save-button').disabled, false);
+  assert.match(b.element('wifi-message').textContent, /not accepted/i);
+  assert.equal(b.calls.filter(c => c.options.method === 'PUT').length, 1);
 });

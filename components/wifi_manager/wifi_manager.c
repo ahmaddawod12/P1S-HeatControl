@@ -21,8 +21,10 @@
 #define WORKER_STACK 4096
 #define RESPONSE_GRACE_MS 250U
 #define RSSI_REFRESH_MS 5000U
+#define NAME_SETTLE_MS 3000U
 static const char *TAG="wifi";
-static bool s_stack_ready, s_mdns_ready, s_storage_ready;
+static bool s_stack_ready, s_storage_ready, s_mdns_service_ready;
+static atomic_bool s_mdns_ready;
 static esp_netif_t *s_sta_netif;
 static _Atomic(SemaphoreHandle_t) s_lock;
 static _Atomic(TaskHandle_t) s_worker;
@@ -32,6 +34,12 @@ static bool s_pending;
 static uint64_t s_apply_at;
 static uint64_t s_rssi_refresh_at;
 static wifi_credentials_t s_requested;
+static char s_saved_name[DEVICE_NAME_LEN];
+static bool s_name_dirty, s_name_network_connected;
+static bool s_name_preflight;
+static char s_candidate_hostname[DEVICE_HOSTNAME_LEN];
+static uint64_t s_name_check_at, s_discovery_retry_at;
+static esp_err_t start_mdns(void);
 typedef struct {
     bool pending, connected;
     char ssid[WIFI_MANAGER_SSID_LEN], ip[WIFI_MANAGER_IP_LEN];
@@ -122,10 +130,40 @@ static esp_err_t native_ap(bool enabled,void *ctx)
     return wifi_ap_shutdown(&ops);
 }
 static esp_err_t native_save(const wifi_credentials_t *credentials,void *ctx)
-{ (void)ctx; return device_config_save_wifi(credentials); }
+{
+    (void)ctx;
+    const esp_err_t err=device_config_save_wifi(credentials);
+    if (err==ESP_OK) {
+        memcpy(s_saved_name,credentials->controller_name,sizeof(s_saved_name));
+        s_name_dirty=true;
+    }
+    return err;
+}
+static esp_err_t select_name(const char *name,uint64_t now)
+{
+    char hostname[DEVICE_HOSTNAME_LEN];
+    esp_err_t err=device_hostname(name,hostname);
+    if (err!=ESP_OK) return err;
+    char candidate[DEVICE_NAME_LEN]={0};
+    strcpy(candidate,name[0]?name:DEVICE_DEFAULT_NAME);
+    memcpy(s_engine.status.controller_name,candidate,sizeof(candidate));
+    strcpy(s_candidate_hostname,hostname);
+    s_engine.status.hostname[0]=0;
+    s_name_preflight=true;
+    s_engine.status.name_pending=true;
+    s_name_check_at=now+NAME_SETTLE_MS;
+    s_discovery_retry_at=0;
+    return ESP_OK;
+}
 static esp_err_t native_connect(const wifi_credentials_t *credentials,void *ctx)
 {
     (void)ctx;
+    if (s_name_dirty) {
+        const esp_err_t err=select_name(credentials->controller_name,now_ms());
+        if (err!=ESP_OK) return err;
+        memcpy(s_engine.status.requested_name,credentials->controller_name,sizeof(credentials->controller_name));
+        s_name_dirty=false;
+    }
     wifi_config_t current;
     const bool same=esp_wifi_get_config(WIFI_IF_STA,&current)==ESP_OK &&
         memcmp(current.sta.ssid,credentials->ssid,sizeof(current.sta.ssid))==0 &&
@@ -187,6 +225,126 @@ static void refresh_rssi(uint64_t now)
         s_engine.status.rssi=ap.rssi;
     xSemaphoreGive(s_lock);
 }
+static void recover_name_setup(void)
+{
+    if (!s_engine.status.ap_active) s_engine.ap_recovery_needed=true;
+}
+static esp_err_t next_name(uint64_t now)
+{
+    char next[DEVICE_NAME_LEN];
+    esp_err_t err=device_name_next(s_engine.status.controller_name,next);
+    if (err==ESP_OK) err=select_name(next,now);
+    recover_name_setup();
+    return err;
+}
+static esp_err_t preflight_name(void)
+{
+    /* Publish the pending state before changing mDNS or waiting for replies.
+     * Readers must never replace this snapshot with the internal identity. */
+    publish();
+    /* Keep the desired name unclaimed while checking its existing owner.
+     * This temporary identity is unique to the station IP on this link and
+     * is never saved or shown as the controller's final address. */
+    char temporary[DEVICE_HOSTNAME_LEN];
+    /* Even the shortest IPv4 makes this longer than every valid user name. */
+    snprintf(temporary,sizeof(temporary),"p1s-discovery-check-%s",s_engine.status.ip_addr);
+    for (char *p=temporary; *p; ++p) if (*p=='.') *p='-';
+    esp_err_t err=mdns_hostname_set(temporary);
+    if (err!=ESP_OK) return err;
+    const unsigned epoch=atomic_load(&s_disconnect_epoch);
+    mdns_result_t *results=NULL;
+    /* This bounded wait is in the connectivity task; HTTP and heat control
+     * keep running. Check one candidate per iteration, never a retry loop. */
+    err=mdns_query(s_candidate_hostname,NULL,NULL,MDNS_TYPE_A,1000,8,&results);
+    bool occupied=false;
+    for (const mdns_result_t *r=results; r; r=r->next)
+        if (r->esp_netif==s_sta_netif) occupied=true;
+    mdns_query_results_free(results);
+    if (err!=ESP_OK) return err;
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    const bool stale=s_pending || s_event.pending || epoch!=atomic_load(&s_disconnect_epoch);
+    xSemaphoreGive(s_lock);
+    if (stale) return ESP_ERR_NOT_ALLOWED;
+    if (occupied) return next_name(now_ms());
+    err=mdns_hostname_set(s_candidate_hostname);
+    if (err==ESP_OK) err=mdns_instance_name_set(s_candidate_hostname);
+    if (err==ESP_OK && !s_mdns_service_ready) {
+        err=mdns_service_add(NULL,"_http","_tcp",80,NULL,0);
+        if (err==ESP_OK) s_mdns_service_ready=true;
+    }
+    if (err!=ESP_OK) return err;
+    strcpy(s_engine.status.hostname,s_candidate_hostname);
+    s_name_preflight=false;
+    s_engine.status.result=WIFI_RESULT_CONNECTED;
+    s_name_check_at=now_ms()+NAME_SETTLE_MS;
+    return ESP_OK;
+}
+static void refresh_name(uint64_t now)
+{
+    if (now<s_discovery_retry_at) return;
+    if (start_mdns()!=ESP_OK) {
+        s_engine.status.name_pending=true;
+        s_engine.status.result=WIFI_RESULT_DRIVER_FAILED;
+        s_discovery_retry_at=now+1000;
+        recover_name_setup();
+        return;
+    }
+    const bool connected=s_engine.status.connected;
+    if (connected!=s_name_network_connected) {
+        s_name_network_connected=connected;
+        s_engine.status.name_pending=true;
+        s_name_check_at=now+NAME_SETTLE_MS;
+        s_name_preflight=true;
+        s_engine.status.hostname[0]=0;
+    }
+    if (!connected || !s_engine.status.configured) return;
+    if (s_name_preflight) {
+        const esp_err_t err=preflight_name();
+        if (err!=ESP_OK && err!=ESP_ERR_NOT_ALLOWED) {
+            s_engine.status.result=WIFI_RESULT_DRIVER_FAILED;
+            s_discovery_retry_at=now_ms()+1000;
+            recover_name_setup();
+        }
+        return;
+    }
+    char actual[DEVICE_HOSTNAME_LEN];
+    if (mdns_hostname_get(actual)!=ESP_OK) {
+        s_engine.status.name_pending=true;
+        s_name_check_at=now+NAME_SETTLE_MS;
+        return;
+    }
+    if (strcmp(actual,s_engine.status.hostname)!=0) {
+        /* mDNS probes and negotiates simultaneous claims. A library rename
+         * means this candidate lost; follow the user's p1s-1, p1s-2 sequence. */
+        s_engine.status.name_pending=true;
+        if (next_name(now)!=ESP_OK || preflight_name()!=ESP_OK)
+            s_engine.status.result=WIFI_RESULT_DRIVER_FAILED;
+        return;
+    }
+    if (!connected || !s_engine.status.configured || !s_engine.status.name_pending || now<s_name_check_at) return;
+    if (!service_operation_begin(SERVICE_OPERATION_WIFI)) return;
+    esp_err_t err=ESP_OK;
+    if (strcmp(s_saved_name,s_engine.status.controller_name)!=0) {
+        wifi_credentials_t saved={0};
+        memcpy(saved.ssid,s_engine.status.ssid,sizeof(saved.ssid));
+        memcpy(saved.password,s_engine.status.password,sizeof(saved.password));
+        memcpy(saved.controller_name,s_engine.status.controller_name,sizeof(saved.controller_name));
+        err=device_config_save_wifi(&saved);
+        if (err==ESP_OK) memcpy(s_saved_name,saved.controller_name,sizeof(s_saved_name));
+    }
+    service_operation_end(SERVICE_OPERATION_WIFI);
+    if (err!=ESP_OK) {
+        s_engine.status.result=WIFI_RESULT_SAVE_FAILED;
+        s_name_check_at=now+1000;
+        recover_name_setup();
+        return;
+    }
+    s_engine.status.name_pending=false;
+    s_engine.status.result=WIFI_RESULT_CONNECTED;
+    /* Leave time to read the final address before the setup hotspot closes. */
+    if (s_engine.status.ap_active) s_engine.close_ap_at=now+10000;
+    ESP_LOGI(TAG,"controller address confirmed: http://%s.local",s_engine.status.hostname);
+}
 static void worker(void *arg)
 {
     (void)arg;
@@ -202,8 +360,15 @@ static void worker(void *arg)
         if (event.pending) {
             if (event.connected) {
                 wifi_engine_connected(&s_engine,event.ssid,event.ip,event.rssi,now);
-                if (s_engine.status.connected && strcmp(event.ssid,s_engine.status.ssid)==0)
+                if (s_engine.status.connected && strcmp(event.ssid,s_engine.status.ssid)==0) {
                     s_rssi_refresh_at=now+RSSI_REFRESH_MS;
+                    if (s_mdns_ready) {
+                        s_engine.status.name_pending=true;
+                        s_name_check_at=now+NAME_SETTLE_MS;
+                        s_name_preflight=true;
+                        s_engine.status.hostname[0]=0;
+                    }
+                }
             }
             else wifi_engine_disconnected(&s_engine,event.result,now);
         }
@@ -211,7 +376,8 @@ static void worker(void *arg)
             (void)wifi_engine_apply(&s_engine,&requested,now,&ops);
             service_operation_end(SERVICE_OPERATION_WIFI);
         }
-        wifi_engine_tick(&s_engine,now,service_operation_current()==SERVICE_OPERATION_NONE,&ops);
+        refresh_name(now);
+        wifi_engine_tick(&s_engine,now,!s_engine.status.name_pending && service_operation_current()==SERVICE_OPERATION_NONE,&ops);
         refresh_rssi(now);
         publish();
         (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(100));
@@ -299,16 +465,18 @@ static esp_err_t init_stack(void)
 static esp_err_t start_mdns(void)
 {
     if (s_mdns_ready) return ESP_OK;
-    esp_err_t err=mdns_init(); if (err!=ESP_OK) return err;
-    err=mdns_hostname_set("p1s-heat");
-    if (err==ESP_OK) err=mdns_instance_name_set("P1S Heat Controller");
-    if (err==ESP_OK) err=mdns_service_add(NULL,"_http","_tcp",80,NULL,0);
+    if (!s_candidate_hostname[0]) {
+        memcpy(s_engine.status.requested_name,s_engine.status.controller_name,sizeof(s_engine.status.requested_name));
+        const esp_err_t name_err=select_name(s_engine.status.controller_name,now_ms());
+        if (name_err!=ESP_OK) return name_err;
+    }
+    const esp_err_t err=mdns_init();
     if (err==ESP_OK) s_mdns_ready=true;
     return err;
 }
 esp_err_t wifi_manager_start(void)
 {
-    if (s_worker) return start_mdns();
+    if (s_worker) return ESP_OK;
     if (!s_lock) s_lock=xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
     wifi_credentials_t credentials;
@@ -328,11 +496,17 @@ esp_err_t wifi_manager_start(void)
     if (storage!=ESP_OK) (void)app_runtime_report_startup_fault(HEAT_FAULT_NVS);
     const esp_err_t err=init_stack(); if (err!=ESP_OK) return err;
     wifi_engine_init(&s_engine,configured?&credentials:NULL,storage,now_ms());
+    memset(s_saved_name,0,sizeof(s_saved_name));
+    if (configured) memcpy(s_saved_name,credentials.controller_name,sizeof(s_saved_name));
+    memcpy(s_engine.status.requested_name,s_saved_name,sizeof(s_saved_name));
+    s_name_network_connected=false; s_name_dirty=false;
+    const esp_err_t name_err=select_name(s_saved_name,now_ms());
+    if (name_err!=ESP_OK) return name_err;
     xSemaphoreTake(s_lock,portMAX_DELAY); s_status=s_engine.status; xSemaphoreGive(s_lock);
     TaskHandle_t created;
     if (xTaskCreate(worker,"wifi_worker",WORKER_STACK,NULL,4,&created)!=pdPASS) return ESP_ERR_NO_MEM;
     atomic_store(&s_worker,created);
-    return start_mdns();
+    return ESP_OK;
 }
 void wifi_manager_get_status(wifi_manager_status_t *out)
 {
@@ -345,7 +519,8 @@ void wifi_manager_get_status(wifi_manager_status_t *out)
 esp_err_t wifi_manager_request_credentials(const wifi_credentials_t *credentials)
 {
     if (!credentials || !wifi_credentials_are_valid_n(credentials->ssid,sizeof(credentials->ssid),
-        credentials->password,sizeof(credentials->password))) return ESP_ERR_INVALID_ARG;
+        credentials->password,sizeof(credentials->password)) ||
+        !device_name_valid_n(credentials->controller_name,sizeof(credentials->controller_name))) return ESP_ERR_INVALID_ARG;
     if (!s_lock) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_lock,portMAX_DELAY);
     const bool ready=s_worker && s_storage_ready;

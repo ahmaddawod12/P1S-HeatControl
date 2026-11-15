@@ -59,9 +59,13 @@ static void latch_fault(heat_controller_t *controller,
     record_output(controller, false, now_ms);
     controller->snapshot.enabled = false;
     controller->snapshot.state = HEAT_STATE_FAULT;
-    controller->snapshot.fault = fault == HEAT_FAULT_NONE
-        ? HEAT_FAULT_SENSOR_INVALID
-        : fault;
+    /* Relay initialization failures require a restart. Later recoverable
+     * faults must not replace them and make acknowledgement possible. */
+    if (controller->snapshot.fault != HEAT_FAULT_OUTPUT_INIT) {
+        controller->snapshot.fault = fault == HEAT_FAULT_NONE
+            ? HEAT_FAULT_SENSOR_INVALID
+            : fault;
+    }
 }
 
 static bool transition_allowed(const heat_controller_t *controller,

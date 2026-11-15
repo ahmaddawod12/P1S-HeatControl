@@ -24,6 +24,7 @@ static uint64_t monotonic_ms;
 static esp_err_t command_result;
 static enum { NORMAL, TIMEOUT, TRICKLE, DISCONNECTED, SLOW_FINAL } receive_mode;
 static bool connection_closed;
+static char requested_controller_name[DEVICE_NAME_LEN];
 static uint64_t socket_timeout_ms = 5000;
 static httpd_uri_t registered[12];
 static size_t registered_count;
@@ -102,6 +103,11 @@ int httpd_req_recv(httpd_req_t *req,char *out,size_t size) {
     memcpy(out,input+input_offset,size); input_offset+=size;return (int)size;
 }
 static void status(app_status_t *out) {*out=fixture;}
+static void network_status(wifi_manager_status_t *out) {
+    *out=(wifi_manager_status_t){.ssid="network",.password="password",
+        .controller_name="left",.requested_name="left",.hostname="p1s-left",
+        .connected=true,.configured=true,.can_save=true};
+}
 static esp_err_t target(float value) {assert(value==60);++commands;return command_result;}
 static esp_err_t calibration(float value) {assert(value==2.5f);++commands;return command_result;}
 static esp_err_t enabled(bool value) {(void)value;++commands;return command_result;}
@@ -110,6 +116,7 @@ static esp_err_t ack(void) {++commands;return command_result;}
 static esp_err_t update(void) {++commands;return command_result;}
 static esp_err_t wifi_change(const wifi_credentials_t *value) {
     assert(!strcmp(value->ssid,"network") && !strcmp(value->password,"password"));
+    strcpy(requested_controller_name,value->controller_name);
     ++commands;return command_result;
 }
 static esp_err_t printer_config(const printer_config_request_t *value) {
@@ -137,7 +144,7 @@ static void reset(void) {
     fixture.temperature.raw_c=42;fixture.temperature.filtered_c=42;
     s_ops=(web_server_ops_t){.get_status=status,.set_target=target,.set_enabled=enabled,
         .set_manual_fan=fan,.ack_fault=ack,.set_calibration=calibration,
-        .request_firmware_update=update,.request_wifi_change=wifi_change,
+        .request_firmware_update=update,.request_wifi_change=wifi_change,.get_wifi_status=network_status,
         .request_printer_config=printer_config,.start_printer_monitor=printer_start,
         .forget_printer_config=ack,.stop_printer_monitor=printer_stop};
     assert(firmware_api_register((void *)1,&s_ops)==ESP_OK);
@@ -217,7 +224,7 @@ static void test_origin(void) {
         manual_fan_disable_handler,acknowledge_handler,calibration_handler};
     for(size_t i=0;i<sizeof(routes)/sizeof(routes[0]);++i) {
         const bool body_allowed=i==0 || i==6;
-        for(unsigned bad=0;bad<5;++bad){
+        for(unsigned bad=0;bad<6;++bad){
             reset();fixture.state=HEAT_STATE_FAULT;input="{\"target_c\":60}";
             httpd_req_t req={.content_len=body_allowed?strlen(input):0};
             if(bad==0)origin=NULL;
@@ -225,13 +232,15 @@ static void test_origin(void) {
             if(bad==2)origin="http://evil.example";
             if(bad==3)csrf="00000000000000000000000000000000";
             if(bad==4)host="evil.example";
+            if(bad==5){host="p1s-other.local";origin="http://p1s-other.local";}
             const esp_err_t result=routes[i](&req);
             assert(!strncmp(response_status,"403",3) && commands==0 && receives==0);
             assert(result!=ESP_OK); /* Do not let IDF purge an unread request body. */
         }
-        for(unsigned ap=0;ap<2;++ap){
+        for(unsigned ap=0;ap<3;++ap){
             reset();if(i==5)fixture.state=HEAT_STATE_FAULT;
-            if(ap){host=local_ip="192.168.4.1";origin="http://192.168.4.1";}
+            if(ap==1){host=local_ip="192.168.4.1";origin="http://192.168.4.1";}
+            if(ap==2){host="p1s-left.local";origin="http://p1s-left.local";}
             input=i==6?"{\"calibration_offset_c\":2.5}":"{\"target_c\":60}";
             httpd_req_t req={.content_len=body_allowed?strlen(input):0};
             routes[i](&req);assert(!strncmp(response_status,"204",3) && commands==1);
@@ -263,6 +272,22 @@ static esp_err_t (*registered_handler(const char *uri,httpd_method_t method))(ht
     for(size_t i=0;i<registered_count;++i)
         if(registered[i].method==method && !strcmp(registered[i].uri,uri))return registered[i].handler;
     assert(!"route was not registered");return NULL;
+}
+static void test_wifi_identity(void) {
+    reset();
+    httpd_req_t req={.method=HTTP_GET};
+    assert(registered_handler("/api/wifi",HTTP_GET)(&req)==ESP_OK);
+    assert(!strncmp(response_status,"200",3));
+    assert(strstr(response_body,"\"controller_name\":\"left\""));
+    assert(strstr(response_body,"\"requested_name\":\"left\""));
+    assert(strstr(response_body,"\"hostname\":\"p1s-left\""));
+    assert(strstr(response_body,"\"name_pending\":false"));
+    input="{\"ssid\":\"network\",\"password\":\"password\",\"controller_name\":\" Right \"}";
+    req=(httpd_req_t){.method=HTTP_PUT,.content_len=strlen(input)};
+    host="p1s-left.local";origin="http://p1s-left.local";
+    assert(registered_handler("/api/wifi",HTTP_PUT)(&req)==ESP_OK);
+    assert(!strncmp(response_status,"202",3) && commands==1);
+    assert(!strcmp(requested_controller_name,"right"));
 }
 static const struct {
     const char *uri;
@@ -357,6 +382,7 @@ int main(int argc,char **argv) {
     if(!strcmp(argv[1],"json"))test_target_parser();
     else if(!strcmp(argv[1],"calibration"))test_calibration();
     else if(!strcmp(argv[1],"origin"))test_origin();
+    else if(!strcmp(argv[1],"wifi_identity"))test_wifi_identity();
     else if(!strcmp(argv[1],"timeout"))test_body(false);
     else if(!strcmp(argv[1],"deadline"))test_body(true);
     else if(!strcmp(argv[1],"service_rejection"))test_service_rejection();

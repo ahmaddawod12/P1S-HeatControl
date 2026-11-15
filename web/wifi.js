@@ -2,13 +2,14 @@
   'use strict';
   var el = {
     form: document.getElementById('wifi-form'), ssid: document.getElementById('wifi-ssid'),
+    name: document.getElementById('wifi-controller-name'), preview: document.getElementById('wifi-name-preview'),
+    nameError: document.getElementById('wifi-name-error'),
     password: document.getElementById('wifi-password'), save: document.getElementById('wifi-save-button'),
     message: document.getElementById('wifi-message'), ap: document.getElementById('wifi-hotspot'),
     link: document.getElementById('wifi-station-link'), discovery: document.getElementById('wifi-discovery-link')
   };
   var status = null, dirty = false, sending = false, waiting = null, uncertain = false;
   var error = '', online = false, fetching = false, timer = null, generation = 0;
-  var recovery = 'Join your new Wi-Fi and open http://p1s-heat.local/. If connection failed, join P1S-Heat-Setup and open http://192.168.4.1. The setup hotspot may have closed after a successful connection.';
   var errors = {
     setup_required: 'Enter your Wi-Fi details and select Save & Connect.',
     no_network: 'The saved network was not found. Check its name and 2.4 GHz availability.',
@@ -18,22 +19,51 @@
     driver_failed: 'The Wi-Fi connection failed. Retrying; you can correct the details below.',
     storage_failed: 'Wi-Fi storage could not be read. Setup access remains available; saving is unavailable.'
   };
-  function sameFields(pair) { return el.ssid.value === pair.ssid && el.password.value === pair.password; }
+  function normalizedName() { return el.name.value.trim().toLowerCase(); }
+  function nameValid(name) {
+    return name.length <= 22 && (name === '' || /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name));
+  }
+  function discoveryHostname() {
+    if (waiting && (!status || status.requested_name !== waiting.controller_name))
+      return 'p1s-' + (waiting.controller_name || '1');
+    return status && status.hostname ? status.hostname : '';
+  }
+  function recoveryText() {
+    var hostname = discoveryHostname();
+    return 'Join your new Wi-Fi' + (hostname ? ' and open http://' + hostname + '.local/.' : ' and open the controller address shown in setup.') +
+      ' If that name was taken, reopen setup to see the final numbered address. If connection failed, join P1S-Heat-Setup and open http://192.168.4.1. The setup hotspot may have closed after a successful connection.';
+  }
+  function sameFields(pair) {
+    return el.ssid.value === pair.ssid && el.password.value === pair.password && normalizedName() === pair.controller_name;
+  }
   function render() {
-    var busy = sending || !!waiting || !!(status && status.applying);
-    el.save.disabled = !online || !status || !status.csrf_token || !status.can_save || busy;
-    el.save.textContent = busy ? 'Connecting…' : 'Save & Connect';
-    el.discovery.href = 'http://p1s-heat.local/';
-    el.discovery.hidden = false;
+    var nameFailed = !!(status && status.connected && status.name_pending && status.result === 'driver_failed');
+    var checking = !!(status && status.connected && status.name_pending && status.result !== 'save_failed' && !nameFailed);
+    var busy = sending || !!waiting || !!(status && status.applying) || checking;
+    var name = normalizedName(), valid = nameValid(name), hostname = discoveryHostname();
+    el.nameError.hidden = valid;
+    el.nameError.textContent = valid ? '' : 'Use 1–22 letters, numbers, or hyphens, with a letter or number at each end. You can also leave the name empty.';
+    if (valid) el.name.removeAttribute('aria-invalid'); else el.name.setAttribute('aria-invalid', 'true');
+    el.preview.textContent = valid ? 'Address: http://p1s-' + (name || '1') + '.local/' : 'Address: enter a valid controller name.';
+    el.save.disabled = !online || !status || !status.csrf_token || !status.can_save || busy || !valid;
+    el.save.textContent = checking ? 'Checking name…' : busy ? 'Connecting…' : 'Save & Connect';
+    el.discovery.hidden = !hostname;
+    if (hostname) {
+      el.discovery.href = 'http://' + hostname + '.local/';
+      el.discovery.textContent = hostname + '.local';
+    }
     window.dispatchEvent(new CustomEvent('p1s-wifi-changing', {detail: busy}));
-    var message = 'Reading Wi-Fi settings…', bad = false;
+    var message = 'Reading Wi-Fi settings…', bad = false, recovery = recoveryText();
     if (sending) message = 'Saving Wi-Fi settings. ' + recovery;
     else if (!online && status) { message = 'Controller unreachable. ' + recovery; bad = true; }
+    else if (checking) message = 'Checking the controller address. If the name is taken, a numbered name will be saved. ' + recovery;
     else if (waiting) message = (uncertain ? 'Save was not confirmed. Checking status. ' : 'Connecting with the saved details. ') + recovery;
     else if (error) { message = error + ' ' + recovery; bad = true; }
     else if (status) {
-      if (status.connected) message = 'Connected to your Wi-Fi.' + (status.ap_active
-        ? ' Rejoin that network and open the controller address below. The setup hotspot closes 10 seconds after connection.' : '');
+      if (nameFailed) { message = 'Could not check the controller address yet. Retrying; the IP address and setup hotspot remain available.'; bad = true; }
+      else if (status.name_pending && status.result === 'save_failed') { message = errors.save_failed + ' ' + recovery; bad = true; }
+      else if (status.connected) message = 'Connected to your Wi-Fi.' + (status.ap_active
+        ? ' Rejoin that network and open the controller address below. The setup hotspot closes 10 seconds after the address is confirmed.' : '');
       else if (status.applying || status.result === 'connecting') message = 'Connecting to the saved network. ' + recovery;
       else { message = (errors[status.result] || 'Waiting for a Wi-Fi connection.') + ' ' + recovery; bad = status.result !== 'setup_required'; }
     }
@@ -42,7 +72,7 @@
     if (status) {
       el.ap.textContent = status.ap_active ? status.ap_ssid + ' · http://' + status.ap_ip : 'Starts automatically if Wi-Fi is unavailable';
       if (online) {
-        el.link.hidden = !status.connected || !!waiting || sending;
+        el.link.hidden = !status.connected || !!(waiting && waiting.ssid !== status.ssid);
         if (!el.link.hidden) {
           el.link.href = 'http://' + status.ip_addr + '/';
           el.link.textContent = 'Open controller · ' + status.ip_addr;
@@ -53,32 +83,40 @@
   function schedule() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
-    if (!document.hidden) timer = setTimeout(refresh, waiting || !online || (status && (status.ap_active || !status.connected)) ? 2000 : 15000);
+    if (!document.hidden) timer = setTimeout(refresh, waiting || !online || (status && (status.name_pending || status.ap_active || !status.connected)) ? 2000 : 15000);
   }
   function refresh() {
     if (fetching) return Promise.resolve();
     fetching = true;
     var requestedGeneration = generation;
+    var requestedDuringSave = sending;
     return fetch('/api/wifi', {cache: 'no-store'}).then(function (response) {
       if (!response.ok) throw new Error('Wi-Fi status unavailable');
       return response.json();
     }).then(function (snapshot) {
       if (requestedGeneration !== generation) return;
       status = snapshot; online = true;
-      if (waiting && !snapshot.applying) {
-        var matches = snapshot.ssid === waiting.ssid && snapshot.password === waiting.password;
-        if (matches) {
+      if (waiting && !requestedDuringSave && !sending && !snapshot.applying) {
+        var matches = snapshot.ssid === waiting.ssid && snapshot.password === waiting.password && snapshot.requested_name === waiting.controller_name;
+        if (snapshot.connected && snapshot.name_pending && snapshot.result === 'driver_failed') {
+          waiting = null; uncertain = false; error = '';
+        } else if (['save_failed', 'ap_failed', 'storage_failed'].indexOf(snapshot.result) >= 0) {
+          waiting = null; uncertain = false; error = errors[snapshot.result];
+        } else if (matches && snapshot.name_pending && snapshot.connected) {
+          // Keep the original draft until the final name has been confirmed.
+        } else if (matches) {
           if (sameFields(waiting)) dirty = false;
           waiting = null; uncertain = false; error = '';
-        } else if (errors[snapshot.result] && ['save_failed', 'ap_failed', 'storage_failed'].indexOf(snapshot.result) >= 0) {
-          waiting = null; uncertain = false; error = errors[snapshot.result];
         } else if (uncertain) {
           waiting = null; uncertain = false; error = 'Save was not confirmed. Review the details before trying again.';
         } else {
           waiting = null; error = 'The saved settings changed in another request. Your draft is kept; review it before saving again.';
         }
       }
-      if (!dirty && !sending && !waiting) { el.ssid.value = snapshot.ssid; el.password.value = snapshot.password; }
+      if (!dirty && !sending && !waiting) {
+        el.ssid.value = snapshot.ssid; el.password.value = snapshot.password;
+        el.name.value = snapshot.controller_name || '';
+      }
       render();
     }).catch(function () {
       if (requestedGeneration !== generation) return;
@@ -88,10 +126,12 @@
   function edited() { dirty = true; error = ''; render(); }
   el.ssid.addEventListener('input', edited);
   el.password.addEventListener('input', edited);
+  el.name.addEventListener('input', edited);
   el.form.addEventListener('submit', function (event) {
     event.preventDefault();
     if (!online || !status || !status.can_save || !status.csrf_token || sending || waiting || status.applying) return;
-    var pair = {ssid: el.ssid.value, password: el.password.value};
+    var pair = {ssid: el.ssid.value, password: el.password.value, controller_name: normalizedName()};
+    if (!nameValid(pair.controller_name)) { render(); return; }
     var ssidBytes = new TextEncoder().encode(pair.ssid).length;
     var passwordBytes = new TextEncoder().encode(pair.password).length;
     if (!ssidBytes || ssidBytes > 32 || pair.ssid.indexOf('\0') >= 0) {
