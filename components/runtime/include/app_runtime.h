@@ -16,6 +16,9 @@ typedef struct {
     esp_err_t (*save_target)(float target_c, void *ctx);
     esp_err_t (*save_calibration)(float calibration_offset_c, void *ctx);
     void *ctx;
+    /* Optional persistence for the effective heating enable state. */
+    bool restore_heating;
+    esp_err_t (*save_heating_enabled)(bool enabled);
 } app_runtime_ops_t;
 
 /* Builds the production operations and delegates to

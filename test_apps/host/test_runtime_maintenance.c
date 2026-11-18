@@ -16,6 +16,7 @@
 #include <string.h>
 
 static atomic_bool heater, fan, fail_output, block_save;
+static atomic_bool saved_heating;
 static atomic_uint saves;
 static atomic_int sensor_fault;
 static _Atomic float sensor_temperature_c = 25.0f;
@@ -34,6 +35,10 @@ void settings_factory_defaults(settings_data_t *data)
 esp_err_t settings_load(settings_data_t *data, settings_load_result_t *result)
 { settings_factory_defaults(data); data->calibration_offset_c = atomic_load(&saved_calibration);
   *result = SETTINGS_LOAD_LOADED; return ESP_OK; }
+esp_err_t settings_load_heating_enabled(bool *enabled)
+{ *enabled = false; return ESP_OK; }
+esp_err_t settings_save_heating_enabled(bool enabled)
+{ atomic_store(&saved_heating, enabled); return ESP_OK; }
 esp_err_t settings_set_target(float value) { (void) value; return ESP_OK; }
 esp_err_t settings_set_calibration(float value)
 {
@@ -104,10 +109,21 @@ static app_status_t wait_status(bool ready, bool heat, uint32_t timeout)
     assert(!"controller did not reach expected state");
     return status;
 }
+static void start_with_recovery(bool restore, bool persist)
+{
+    const app_runtime_ops_t ops = {
+        .read_sensor = read_sensor,
+        .set_outputs = set_outputs,
+        .save_target = save_target,
+        .save_calibration = save_calibration,
+        .restore_heating = restore,
+        .save_heating_enabled = persist ? settings_save_heating_enabled : NULL,
+    };
+    assert(app_runtime_start_with_ops(&ops) == ESP_OK);
+}
 static void start(void)
 {
-    const app_runtime_ops_t ops = {read_sensor, set_outputs, save_target, save_calibration, NULL};
-    assert(app_runtime_start_with_ops(&ops) == ESP_OK);
+    start_with_recovery(false, false);
     (void) wait_status(true, false, 4000);
 }
 static void enable(void)
@@ -115,6 +131,27 @@ static void enable(void)
     assert(app_runtime_set_enabled(true) == ESP_OK);
     (void) wait_status(true, true, 7000);
     assert(atomic_load(&heater));
+}
+static void heating_enable_survives_restart(void)
+{
+    start_with_recovery(false, true);
+    (void) wait_status(true, false, 4000);
+    enable();
+    assert(atomic_load(&saved_heating));
+    app_runtime_stop();
+
+    start_with_recovery(atomic_load(&saved_heating), true);
+    assert(!atomic_load(&heater));
+    (void) wait_status(true, true, 4000);
+    assert(!app_runtime_monitor_active());
+    assert(app_runtime_set_enabled(false) == ESP_OK);
+    (void) wait_status(true, false, 2000);
+    assert(!atomic_load(&saved_heating));
+    app_runtime_stop();
+
+    start_with_recovery(atomic_load(&saved_heating), true);
+    assert(!wait_status(true, false, 4000).enabled);
+    app_runtime_stop();
 }
 static void urgent_disable_discards_previously_queued_enables(void)
 {
@@ -780,6 +817,10 @@ int main(int argc, char **argv)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
     if (argc == 2) {
+        if (strcmp(argv[1], "heating_recovery") == 0) {
+            heating_enable_survives_restart();
+            return 0;
+        }
         if (strcmp(argv[1], "retry_reset") == 0) sensor_retry_success_resets_count_and_fifth_failure_latches();
         else if (strcmp(argv[1], "retry_stall") == 0) acquisition_stall_after_failed_read_still_shuts_down();
         else if (strcmp(argv[1], "cadence") == 0) conversion_wait_preserves_cadence_and_stop_response();

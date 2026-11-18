@@ -298,6 +298,7 @@ target_include_directories(test_runtime_maintenance PRIVATE stubs
 target_compile_options(test_runtime_maintenance PRIVATE -Wall -Wextra -Werror -pedantic)
 target_link_libraries(test_runtime_maintenance PRIVATE pthread m)
 add_test(NAME runtime_maintenance COMMAND test_runtime_maintenance)
+add_test(NAME runtime_heating_recovery COMMAND test_runtime_maintenance heating_recovery)
 foreach(sensor_case retry_reset retry_stall cadence)
     add_test(NAME runtime_sensor_${sensor_case} COMMAND test_runtime_maintenance ${sensor_case})
 endforeach()

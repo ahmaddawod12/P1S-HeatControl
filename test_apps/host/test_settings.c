@@ -11,6 +11,8 @@
 static bool namespace_exists;
 static unsigned char blob[sizeof(settings_data_t)];
 static size_t blob_size;
+static bool heating_present;
+static uint8_t heating_value;
 static esp_err_t write_error, commit_error;
 
 esp_err_t nvs_flash_init(void) { return ESP_OK; }
@@ -37,6 +39,21 @@ esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, s
     assert(handle == 1 && strcmp(key, "settings") == 0 && size <= sizeof(blob));
     if (write_error) return write_error;
     memcpy(blob, data, size); blob_size = size;
+    return ESP_OK;
+}
+esp_err_t nvs_get_u8(nvs_handle_t handle, const char *key, uint8_t *out)
+{
+    assert(handle == 1 && strcmp(key, "heat_enabled") == 0);
+    if (!heating_present) return ESP_ERR_NVS_NOT_FOUND;
+    *out = heating_value;
+    return ESP_OK;
+}
+esp_err_t nvs_set_u8(nvs_handle_t handle, const char *key, uint8_t value)
+{
+    assert(handle == 1 && strcmp(key, "heat_enabled") == 0);
+    if (write_error) return write_error;
+    heating_present = true;
+    heating_value = value;
     return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t handle) { assert(handle == 1); return commit_error; }
@@ -93,11 +110,28 @@ static void test_corrupt_legacy_and_future_records_recover_defaults(void)
     }
 }
 
+static void test_heating_enable_record(void)
+{
+    seed(2, 60.0f, 0.0f);
+    bool enabled = true;
+    assert(settings_load_heating_enabled(&enabled) == ESP_OK && !enabled);
+    assert(settings_save_heating_enabled(true) == ESP_OK);
+    assert(settings_load_heating_enabled(&enabled) == ESP_OK && enabled);
+    assert(settings_save_heating_enabled(false) == ESP_OK);
+    assert(settings_load_heating_enabled(&enabled) == ESP_OK && !enabled);
+    heating_value = 2;
+    enabled = true;
+    assert(settings_load_heating_enabled(&enabled) == ESP_ERR_INVALID_STATE && !enabled);
+    commit_error = ESP_FAIL;
+    assert(settings_save_heating_enabled(true) == ESP_FAIL);
+}
+
 int main(void)
 {
     test_ntc_offset_is_reset_once_without_losing_target();
     test_migration_failures_are_not_reported_as_success();
     test_corrupt_legacy_and_future_records_recover_defaults();
+    test_heating_enable_record();
     puts("settings: PASS");
     return 0;
 }

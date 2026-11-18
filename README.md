@@ -136,11 +136,11 @@ under **P1S Heat Controller Board → Relay channels are active low**
 | Circulation fan | On with the heater or manually, plus 5 s after reaching the target or 10 s after disable |
 | Over-temperature | Latched fault at 82 °C from raw **or** filtered temperature |
 
-Persisted: Wi-Fi credentials, target, calibration offset, and optional printer
-connection settings. **Never**
-persisted: enabled state, active fault, runtime state, or relay state. Both
-relays start inactive on every boot and reset, and heating never resumes
-automatically — someone has to enable it again.
+Wi-Fi credentials, target, calibration offset, heating enable state, and optional
+printer connection settings are saved in flash. Both relays start inactive at
+boot. Previously enabled heating resumes after three consecutive valid sensor
+samples if startup checks pass. If heating was disabled or has never been saved,
+it stays disabled. Active faults and relay states are transient.
 
 Acknowledging a fault returns to IDLE and never resumes heating. Sensor faults
 need three consecutive clean samples; an over-temperature fault needs the
@@ -451,7 +451,8 @@ Actual source verification results and pending physical checks are recorded in
 5. `wifi_manager_start` — dedicated device configuration and saved Wi-Fi
 6. `web_server_start`, then the update worker
 7. Optional printer coordinator — saved connection settings restore the printer
-   connection only; Monitor P1S and heating never restore after a reboot
+   connection only; Monitor P1S starts off. Heating restores its saved enable
+   state once the sensor has reported three valid samples and startup checks pass.
 
 A relay or runtime failure stops startup with the outputs off. A networking or
 web-server failure leaves the runtime regulating and retries in the background.

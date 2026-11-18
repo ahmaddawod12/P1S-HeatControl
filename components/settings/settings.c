@@ -10,6 +10,7 @@
 
 #define SETTINGS_NAMESPACE "heat_cfg"
 #define SETTINGS_KEY "settings"
+#define HEATING_ENABLED_KEY "heat_enabled"
 
 _Static_assert(sizeof(settings_data_t) == 12,
                "settings_data_t layout is part of the NVS schema");
@@ -176,4 +177,33 @@ esp_err_t settings_set_target(float target_c)
 esp_err_t settings_set_calibration(float calibration_offset_c)
 {
     return update(calibration_offset_c, false);
+}
+
+esp_err_t settings_load_heating_enabled(bool *enabled)
+{
+    *enabled = false;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+
+    uint8_t value = 0;
+    err = nvs_get_u8(handle, HEATING_ENABLED_KEY, &value);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    if (err != ESP_OK) return err;
+    if (value > 1) return ESP_ERR_INVALID_STATE;
+    *enabled = value == 1;
+    return ESP_OK;
+}
+
+esp_err_t settings_save_heating_enabled(bool enabled)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, HEATING_ENABLED_KEY, enabled);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    return err;
 }

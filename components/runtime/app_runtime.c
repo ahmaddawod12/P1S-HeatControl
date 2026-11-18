@@ -46,6 +46,7 @@ static atomic_bool s_maintenance_safe;
 static atomic_bool s_urgent_disable;
 static atomic_uint s_enable_epoch;
 static unsigned s_pending_commands;
+static bool s_startup_settings_valid;
 /* Written under s_admission_lock; the flag is also read lock-free. */
 static atomic_bool s_monitor_active;
 static uint64_t s_monitor_permit_until;
@@ -185,6 +186,8 @@ static void controller_task(void *arg)
     bool heater_on = false;
     bool fan_on = false;
     bool manual_fan_on = false;
+    bool saved_enabled = s_ops.restore_heating;
+    bool restore_pending = saved_enabled && s_startup_settings_valid;
     heat_controller_snapshot_t previous = heat_controller_snapshot(&s_controller);
     runtime_output_policy_t output_policy;
     runtime_output_policy_init(&output_policy);
@@ -269,6 +272,17 @@ static void controller_task(void *arg)
             (void) heat_controller_command(&s_controller, &disable, sample_arg, timestamp_ms);
             manual_fan_on = false;
         }
+        const heat_controller_snapshot_t before_restore = heat_controller_snapshot(&s_controller);
+        if (urgent_disable || maintenance || before_restore.state == HEAT_STATE_FAULT ||
+            before_restore.target_c <= 0.0f) {
+            restore_pending = false;
+        }
+        if (restore_pending && outputs_known && sample_arg && sample.valid &&
+            sample.consecutive_valid >= 3U) {
+            const heat_controller_command_t enable = {.kind = HEAT_COMMAND_ENABLE};
+            (void) heat_controller_command(&s_controller, &enable, sample_arg, timestamp_ms);
+            restore_pending = false;
+        }
         /* Disabled heating (any path) ends monitoring; a stale permit holds
          * the element off while heating stays enabled. */
         if (atomic_load(&s_monitor_active) && !heat_controller_snapshot(&s_controller).enabled) {
@@ -282,8 +296,21 @@ static void controller_task(void *arg)
             heat_controller_step(&s_controller, &sample, timestamp_ms);
         }
 
-        const heat_controller_snapshot_t snapshot =
-            heat_controller_snapshot(&s_controller);
+        heat_controller_snapshot_t snapshot = heat_controller_snapshot(&s_controller);
+        if (snapshot.state == HEAT_STATE_FAULT) restore_pending = false;
+        if (s_ops.save_heating_enabled && snapshot.enabled && !saved_enabled) {
+            /* A failed commit can still have modified flash. Clear it after
+             * forcing the outputs off, even when the write reports an error. */
+            saved_enabled = true;
+            if (s_ops.save_heating_enabled(true) != ESP_OK) {
+                const heat_controller_command_t fault = {
+                    .kind = HEAT_COMMAND_LATCH_EXTERNAL_FAULT,
+                    .fault = HEAT_FAULT_NVS,
+                };
+                (void) heat_controller_command(&s_controller, &fault, sample_arg, timestamp_ms);
+                snapshot = heat_controller_snapshot(&s_controller);
+            }
+        }
         const runtime_output_request_t output_request =
             runtime_output_policy_step(&output_policy, &snapshot, heater_on,
                                        manual_fan_on, timestamp_ms);
@@ -299,6 +326,18 @@ static void controller_task(void *arg)
                 outputs_known = true;
             } else {
                 ESP_LOGE(TAG, "relay write failed: %s", esp_err_to_name(err));
+            }
+        }
+
+        if (s_ops.save_heating_enabled && saved_enabled && !snapshot.enabled && !restore_pending) {
+            saved_enabled = s_ops.save_heating_enabled(false) != ESP_OK;
+            if (saved_enabled && snapshot.fault == HEAT_FAULT_NONE) {
+                const heat_controller_command_t fault = {
+                    .kind = HEAT_COMMAND_LATCH_EXTERNAL_FAULT,
+                    .fault = HEAT_FAULT_NVS,
+                };
+                (void) heat_controller_command(&s_controller, &fault, sample_arg, timestamp_ms);
+                snapshot = heat_controller_snapshot(&s_controller);
             }
         }
 
@@ -322,7 +361,7 @@ static void controller_task(void *arg)
             xQueueOverwrite(s_ack_queue, &reply);
         }
         atomic_store(&s_maintenance_safe, maintenance && outputs_known && !heater_on && !fan_on &&
-                     s_pending_commands == 0);
+                     s_pending_commands == 0 && !saved_enabled);
         xSemaphoreGive(s_admission_lock);
     }
 
@@ -373,6 +412,7 @@ esp_err_t app_runtime_start_with_ops(const app_runtime_ops_t *ops)
     }
 
     s_ops = *ops;
+    s_startup_settings_valid = load_result != SETTINGS_LOAD_RECOVERED_CORRUPT;
     temperature_monitor_init(&s_monitor, settings.calibration_offset_c);
     heat_controller_init(&s_controller, &(heat_controller_config_t) {
         .target_c = settings.target_c,
@@ -464,16 +504,27 @@ esp_err_t app_runtime_start(void)
         return err;
     }
 
+    bool restore_heating = false;
+    esp_err_t restore_err = settings_load_heating_enabled(&restore_heating);
+    if (restore_err == ESP_OK && restore_heating && !outputs_ready) {
+        restore_err = settings_save_heating_enabled(false);
+        restore_heating = false;
+    }
+
     const app_runtime_ops_t ops = {
         .read_sensor = production_read_sensor,
         .set_outputs = production_set_outputs,
         .save_target = production_save_target,
         .save_calibration = production_save_calibration,
         .ctx = NULL,
+        .restore_heating = outputs_ready && restore_err == ESP_OK && restore_heating,
+        .save_heating_enabled = settings_save_heating_enabled,
     };
     err = app_runtime_start_with_ops(&ops);
     if (err == ESP_OK && !outputs_ready) {
         (void) app_runtime_report_startup_fault(HEAT_FAULT_OUTPUT_INIT);
+    } else if (err == ESP_OK && restore_err != ESP_OK) {
+        (void) app_runtime_report_startup_fault(HEAT_FAULT_NVS);
     }
     return err;
 }

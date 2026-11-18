@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -24,6 +25,8 @@ typedef struct {
 } settings_data_t;
 
 esp_err_t settings_init(void);
+esp_err_t settings_load_heating_enabled(bool *enabled);
+esp_err_t settings_save_heating_enabled(bool enabled);
 void settings_factory_defaults(settings_data_t *data);
 esp_err_t settings_load(settings_data_t *data,
                         settings_load_result_t *out_result);
