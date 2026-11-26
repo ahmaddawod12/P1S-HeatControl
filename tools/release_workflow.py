@@ -14,7 +14,7 @@ def git(root, *arguments):
     return result.stdout.strip()
 
 
-def release_plan(root, ref, repository, commit):
+def release_plan(root, ref, repository, commit, stage_only=False):
     require(repository == RELEASE_REPOSITORY, "Releases require the upstream repository")
     require(ref == "refs/heads/main", "Releases must run from main")
     require(commit and git(root, "rev-parse", "HEAD") == commit,
@@ -24,8 +24,13 @@ def release_plan(root, ref, repository, commit):
     version = (root / "version.txt").read_text(encoding="utf-8").strip()
     stable_version(version)
     tag = f"v{version}"
+    notes = root / "docs/releases" / f"{tag}.md"
+    if stage_only:
+        require(notes.is_file() and notes.read_text(encoding="utf-8").strip(),
+                f"Add nonempty release notes at docs/releases/{tag}.md")
+        return {"version": version, "tag": tag, "commit": commit, "publish": "false", "build": "true"}
     tags = git(root, "tag", "--list").splitlines()
-    plan = {"version": version, "tag": tag, "commit": commit, "publish": "false"}
+    plan = {"version": version, "tag": tag, "commit": commit, "publish": "false", "build": "false"}
     if tag in tags:
         return plan
 
@@ -39,10 +44,10 @@ def release_plan(root, ref, repository, commit):
         previous.append(tuple(int(part) for part in candidate.split(".")))
     require(not previous or tuple(int(part) for part in version.split(".")) > max(previous),
             "Release version must be newer than every existing stable version tag")
-    notes = root / "docs/releases" / f"{tag}.md"
     require(notes.is_file() and notes.read_text(encoding="utf-8").strip(),
             f"Add nonempty release notes at docs/releases/{tag}.md")
     plan["publish"] = "true"
+    plan["build"] = "true"
     return plan
 
 
@@ -53,13 +58,16 @@ def main():
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA"))
     parser.add_argument("--github-output", type=Path, default=os.environ.get("GITHUB_OUTPUT"))
+    parser.add_argument("--stage-only", action="store_true", help="sign a package without publishing")
     arguments = parser.parse_args()
     try:
-        plan = release_plan(arguments.root, arguments.ref, arguments.repository, arguments.commit)
+        plan = release_plan(arguments.root, arguments.ref, arguments.repository, arguments.commit, arguments.stage_only)
         if arguments.github_output:
             with arguments.github_output.open("a", encoding="utf-8", newline="\n") as output:
                 output.write("".join(f"{name}={value}\n" for name, value in plan.items()))
-        if plan["publish"] == "true":
+        if arguments.stage_only:
+            print(f"Preparing signed assets for {plan['tag']} from {plan['commit']}")
+        elif plan["publish"] == "true":
             print(f"Ready to release {plan['tag']} from {plan['commit']}")
         else:
             print(f"Skipping {plan['tag']}: tag already exists; nothing will be overwritten")

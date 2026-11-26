@@ -7,11 +7,12 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES device_config
     PRIV_REQUIRES
+        bootloader_support
+        esp_hw_support
         runtime
         esp_wifi
         esp_event
         esp_netif
         esp_timer
-        mdns
         nvs_flash
 )

@@ -1,10 +1,12 @@
 name: Release firmware
 
 on:
-  push:
-    branches: [main]
-    paths: [version.txt]
   workflow_dispatch:
+    inputs:
+      stage_only:
+        description: 'Build and sign without publishing a release'
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -26,6 +28,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
       publish: ${{ steps.release.outputs.publish }}
+      build: ${{ steps.release.outputs.build }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -33,47 +36,19 @@ jobs:
           persist-credentials: false
       - name: Check version, source and release notes
         id: release
-        run: python3 tools/release_workflow.py
+        env:
+          P1S_STAGE_ONLY: ${{ inputs.stage_only }}
+        run: |
+          args=()
+          if [ "$P1S_STAGE_ONLY" = 'true' ]; then
+            args+=(--stage-only)
+          fi
+          python3 tools/release_workflow.py "${args[@]}"
 
   test:
     needs: prepare
-    if: needs.prepare.outputs.publish == 'true'
-    runs-on: windows-2022
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      # Match the cJSON version used by the ESP-IDF managed component.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: DaveGamble/cJSON
-          ref: c859b25da02955fef659d658b8f324b5cde87be3 # v1.7.19
-          path: managed_components/espressif__cjson/cJSON
-          persist-credentials: false
-      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-      - name: Host tests
-        shell: msys2 {0}
-        run: |
-          cmake -S test_apps/host -B test_apps/host/build -G Ninja
-          cmake --build test_apps/host/build --parallel 2
-          ctest --test-dir test_apps/host/build --output-on-failure
-      - name: Dashboard tests
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-      - name: Run dashboard tests
-        run: node --test test_apps/web/*.cjs
-      - name: Local publisher safeguards
-        shell: pwsh
-        run: ./test_apps/tools/test_publish_firmware.ps1
+    if: needs.prepare.outputs.build == 'true'
+    uses: ./.github/workflows/ci.yml
 
   build:
     needs: [prepare, test]
@@ -81,22 +56,27 @@ jobs:
     timeout-minutes: 30
     env:
       P1S_VERSION: ${{ needs.prepare.outputs.version }}
+      P1S_STAGE_ONLY: ${{ inputs.stage_only }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Build generic firmware and run tool checks
+      - name: Build generic firmware
         run: |
           docker run --rm --volume "$PWD:/project" --workdir /project "$IDF_IMAGE" bash -euc '
             git config --global --add safe.directory /project
-            idf.py -B build-release -D SDKCONFIG=sdkconfig.release -D P1S_BOOTSTRAP_CREDENTIALS=OFF build
-            python -m unittest discover -s test_apps/tools -v
-            python tools/check_printer_stack.py --build build-release
-            idf.py -C test_apps/unit -B build-ci build
+            mkdir -p build-release
+            cp config/sdkconfig.release build-release/sdkconfig
+            idf.py -B build-release -D SDKCONFIG=build-release/sdkconfig -D P1S_BOOTSTRAP_CREDENTIALS=OFF build
           '
       - name: Recheck committed source
-        run: python3 tools/release_workflow.py
+        run: |
+          args=()
+          if [ "$P1S_STAGE_ONLY" = 'true' ]; then
+            args+=(--stage-only)
+          fi
+          python3 tools/release_workflow.py "${args[@]}"
       - name: Sign and validate the two public assets
         env:
           OTA_SIGNING_PRIVATE_KEY: ${{ secrets.OTA_SIGNING_PRIVATE_KEY }}
@@ -132,6 +112,7 @@ jobs:
 
   publish:
     needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

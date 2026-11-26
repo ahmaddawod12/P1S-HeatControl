@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS
         "app_runtime.c"
-        "runtime_output_policy.c"
         "service_operation.c"
     INCLUDE_DIRS "include"
     REQUIRES

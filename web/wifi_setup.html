@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wi-Fi setup</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  main { max-width: 28rem; margin: 2rem auto; padding: 0 1rem; }
+  label, input { display: block; box-sizing: border-box; width: 100%; }
+  input, button { padding: .65rem; font: inherit; }
+  input { margin: .25rem 0 1rem; }
+</style>
+<main>
+  <h1>Wi-Fi setup</h1>
+  <p id="board-id" hidden></p>
+  <p id="return-to-pairing" hidden><a href="/">Return to pairing</a></p>
+  <form id="wifi">
+    <label>Network name <input id="ssid" maxlength="32" required></label>
+    <label>Wi-Fi password <input id="password" type="password" maxlength="63" autocomplete="new-password" aria-describedby="password-help"></label>
+    <p id="password-help">Leave the password blank for an open network.</p>
+    <button id="connect" disabled>Connect</button>
+    <p id="status" role="status">Loading Wi-Fi setup…</p>
+  </form>
+</main>
+<script>
+  const ssid = document.getElementById('ssid');
+  const password = document.getElementById('password');
+  const connect = document.getElementById('connect');
+  const status = document.getElementById('status');
+  const boardLabel = document.getElementById('board-id');
+  const returnToPairing = document.getElementById('return-to-pairing');
+  const errors = {
+    auth_failed: 'Wi-Fi authentication failed. Check the password.',
+    no_network: 'Wi-Fi network unavailable. Check the network name.',
+    storage_failed: 'Wi-Fi settings could not be loaded.',
+    driver_failed: 'Could not connect. Retrying…',
+    ap_failed: 'The setup hotspot could not be started.',
+    save_failed: 'Could not save Wi-Fi settings. Try again.'
+  };
+  let boardId;
+  let token;
+  let saving = false;
+  let pendingSave;
+  let initialized = false;
+  let canSave = false;
+  let previousResult;
+  let changingNetwork = location.pathname === '/wifi';
+
+  function updateButton() {
+    connect.disabled = !canSave || saving || !!pendingSave;
+  }
+
+  async function refresh() {
+    const submitted = pendingSave;
+    let reload = false;
+    try {
+      const response = await fetch('/api/wifi', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (response.status === 404) {
+        reload = true;
+        location.replace('/');
+        return;
+      }
+      if (!response.ok) throw new Error('Wi-Fi setup unavailable');
+      const id = response.headers.get('X-P1S-Board-ID');
+      if (!id || (boardId && id !== boardId)) {
+        token = undefined;
+        canSave = false;
+        previousResult = undefined;
+        returnToPairing.hidden = true;
+        status.textContent = 'The connected controller changed. Reload this page to continue.';
+        return;
+      }
+      const wifi = await response.json();
+      token = wifi.csrf_token;
+      if (!initialized) {
+        boardId = id;
+        boardLabel.textContent = 'Board ' + boardId;
+        boardLabel.hidden = false;
+        if (!ssid.value) ssid.value = wifi.ssid;
+        initialized = true;
+        status.textContent = '';
+      }
+      canSave = !!token && wifi.can_save && !wifi.applying;
+      if (submitted && submitted === pendingSave) {
+        if (submitted.id !== wifi.save_id || submitted.token !== token) {
+          pendingSave = undefined;
+          status.textContent = 'Could not confirm this save. Review the settings and try again.';
+        } else if (!wifi.applying && wifi.save_result !== 'pending') {
+          pendingSave = undefined;
+          if (wifi.save_result === 'saved') {
+            changingNetwork = false;
+            if (ssid.value === submitted.ssid && password.value === submitted.password) password.value = '';
+            status.textContent = errors[wifi.result] || 'Connecting to Wi-Fi…';
+          } else {
+            status.textContent = errors[wifi.save_result] || 'Could not save Wi-Fi settings. Try again.';
+          }
+        }
+      } else if (!saving && !pendingSave && wifi.result !== previousResult) {
+        status.textContent = errors[wifi.result] || (wifi.result === 'connecting' ? 'Connecting to Wi-Fi…' : '');
+      }
+      previousResult = wifi.result;
+      returnToPairing.hidden = !wifi.pairing;
+      if (wifi.pairing && !changingNetwork) {
+        reload = true;
+        location.replace('/');
+      }
+    } catch {
+      canSave = false;
+      status.textContent = 'Wi-Fi setup is unreachable.';
+    } finally {
+      updateButton();
+      if (!reload) setTimeout(refresh, 1500);
+    }
+  }
+
+  document.getElementById('wifi').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (connect.disabled) return;
+    const draft = { ssid: ssid.value, password: password.value };
+    const submitToken = token;
+    saving = true;
+    canSave = false;
+    updateButton();
+    status.textContent = 'Saving Wi-Fi settings…';
+    try {
+      const response = await fetch('/api/wifi', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-P1S-CSRF': submitToken },
+        body: JSON.stringify(draft),
+        signal: AbortSignal.timeout(5000)
+      });
+      if (response.status === 404) {
+        location.replace('/');
+        return;
+      }
+      if (response.status === 400) {
+        status.textContent = 'Enter a valid network name and Wi-Fi password.';
+        return;
+      }
+      if (!response.ok) throw new Error('Wi-Fi save failed');
+      const { save_id: id } = await response.json();
+      if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Missing Wi-Fi save receipt');
+      pendingSave = { ...draft, id, token: submitToken };
+    } catch {
+      status.textContent = 'Could not confirm this save. Check the connection before trying again.';
+    } finally {
+      saving = false;
+      updateButton();
+    }
+  });
+  refresh();
+</script>

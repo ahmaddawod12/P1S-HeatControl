@@ -1,0 +1,50 @@
+menu "P1S Firebase"
+
+config P1S_FIREBASE_ENABLED
+    bool "Enable controller operation through Firebase"
+    default n
+    select ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT
+    select MBEDTLS_CERTIFICATE_BUNDLE
+    select MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY
+    help
+        Connect to a configured Firebase project for website commands,
+        telemetry and device enrollment. An unconfigured build keeps the
+        relay off and starts no network services.
+
+if P1S_FIREBASE_ENABLED
+
+config P1S_FIREBASE_PUBLIC_RELEASE
+    bool "Build public firmware with per-device setup credentials"
+    default n
+    help
+        Generate and store a unique setup hotspot passphrase on each device.
+        The application is eligible for signing as a public OTA release.
+
+config P1S_FIREBASE_DATABASE_URL
+    string "Realtime Database URL"
+    default ""
+    help
+        Use the project's HTTPS Realtime Database URL without a path.
+
+config P1S_FIREBASE_API_KEY
+    string "Firebase web API key"
+    default ""
+    help
+        Used with the Firebase Authentication REST endpoints.
+
+config P1S_FIREBASE_PAIRING_URL
+    string "HTTPS base URL for device enrollment"
+    default ""
+    help
+        The device uses the begin and poll endpoints under this URL.
+
+config P1S_FIREBASE_SETUP_PASSPHRASE
+    string "Pilot controller setup hotspot passphrase"
+    depends on !P1S_FIREBASE_PUBLIC_RELEASE
+    default ""
+    help
+        Provision a unique password of 8 to 63 characters per controller
+        in its ignored SDK configuration file.
+
+endif
+endmenu

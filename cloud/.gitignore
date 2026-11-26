@@ -1,0 +1,11 @@
+node_modules/
+dist/
+functions/lib/
+.firebase/
+.firebaserc
+.env
+.env.*
+!.env.example
+*-debug.log
+playwright-report/
+test-results/

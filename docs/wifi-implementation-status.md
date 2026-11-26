@@ -1,4 +1,7 @@
-# Wi-Fi configuration and fallback hotspot
+# Wi-Fi configuration history
+
+These notes describe earlier firmware. The current Firebase firmware uses the
+[Wi-Fi and pairing setup flow](../README.md#wi-fi-setup-and-dashboard-access).
 
 ## Controller names (2026-11-15)
 

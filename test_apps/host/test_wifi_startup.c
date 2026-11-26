@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <setjmp.h>
 
 /* Keep manager startup real; replace the radio, network-stack and RTOS
  * boundaries, including their persistent resource ownership. */
@@ -10,9 +9,8 @@
 
 typedef enum {
     FAIL_NONE, FAIL_NVS, FAIL_NETIF, FAIL_EVENT_LOOP, FAIL_RADIO_INIT,
-    FAIL_STORAGE, FAIL_WIFI_HANDLER, FAIL_IP_HANDLER, FAIL_AP_MODE,
-    FAIL_AP_CONFIG, FAIL_STA_MODE, FAIL_RADIO_START, FAIL_WORKER,
-    FAIL_MDNS_INIT, FAIL_MDNS_HOSTNAME, FAIL_MDNS_INSTANCE, FAIL_MDNS_SERVICE
+    FAIL_STORAGE, FAIL_WIFI_HANDLER, FAIL_IP_HANDLER, FAIL_AP_MODE, FAIL_MAC,
+    FAIL_AP_CONFIG, FAIL_STA_MODE, FAIL_RADIO_START, FAIL_WORKER
 } failure_t;
 static failure_t s_failure;
 static bool s_netif_initialized, s_event_loop_created, s_radio_initialized;
@@ -25,9 +23,6 @@ static bool s_sta_created, s_ap_created;
 static unsigned s_duplicate_resources, s_worker_creations;
 static esp_event_handler_t s_registered_wifi, s_registered_ip;
 static unsigned s_wifi_registrations, s_ip_registrations;
-static jmp_buf s_iteration_done;
-static uint64_t s_now;
-static char s_test_hostname[DEVICE_HOSTNAME_LEN];
 static bool failing(failure_t point) { return s_failure == point; }
 
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
@@ -36,7 +31,7 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t lock, TickType_t wait)
 BaseType_t xSemaphoreGive(SemaphoreHandle_t lock) { assert(lock); return pdTRUE; }
 BaseType_t xTaskNotifyGive(TaskHandle_t task) { assert(task); return pdPASS; }
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
-{ (void)clear; (void)wait; longjmp(s_iteration_done,1); }
+{ (void)clear; (void)wait; abort(); }
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
     void *arg, UBaseType_t priority, TaskHandle_t *out)
 {
@@ -47,7 +42,7 @@ BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
     *out = (TaskHandle_t)1;
     return pdPASS;
 }
-int64_t esp_timer_get_time(void) { return (int64_t)s_now*1000; }
+int64_t esp_timer_get_time(void) { return 0; }
 void app_runtime_set_network_status(int8_t rssi, const char *ip)
 { (void)rssi; (void)ip; }
 esp_err_t app_runtime_report_startup_fault(heat_fault_t fault)
@@ -130,6 +125,14 @@ esp_err_t esp_wifi_set_mode(wifi_mode_t mode)
     s_radio_mode = mode;
     return ESP_OK;
 }
+esp_err_t esp_wifi_get_mac(int interface, uint8_t mac[6])
+{
+    assert(interface == WIFI_IF_STA && s_radio_initialized && !s_radio_started);
+    if (failing(FAIL_MAC)) return ESP_FAIL;
+    const uint8_t station_mac[] = {0x7C, 0x87, 0xCE, 0x01, 0x02, 0x0A};
+    memcpy(mac, station_mac, sizeof(station_mac));
+    return ESP_OK;
+}
 esp_err_t esp_wifi_set_config(int interface, const wifi_config_t *config)
 {
     assert(config);
@@ -144,8 +147,9 @@ esp_err_t esp_wifi_start(void)
     assert(s_radio_initialized && s_ram_storage && !s_radio_started);
     assert(s_radio_mode == WIFI_MODE_STA);
     /* No factory/default AP may be exposed, even on a retry. */
-    assert(s_ap_config.ap.ssid_len == 14);
-    assert(memcmp(s_ap_config.ap.ssid, "P1S-Heat-Setup", 14) == 0);
+    const char expected_ssid[] = "P1S-Heat-Setup-7C87CE01020A";
+    assert(s_ap_config.ap.ssid_len == sizeof(expected_ssid) - 1);
+    assert(memcmp(s_ap_config.ap.ssid, expected_ssid, sizeof(expected_ssid)) == 0);
     assert(s_ap_config.ap.channel == 1 && s_ap_config.ap.authmode == WIFI_AUTH_OPEN);
     assert(s_ap_config.ap.max_connection == 4);
     assert(s_registered_wifi && s_registered_ip);
@@ -161,47 +165,16 @@ esp_err_t esp_netif_get_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *ip)
 { (void)netif; (void)ip; return ESP_FAIL; }
 esp_err_t esp_wifi_connect(void) { assert(s_radio_started); return ESP_OK; }
 esp_err_t esp_wifi_disconnect(void) { return ESP_OK; }
-esp_err_t mdns_init(void) { return failing(FAIL_MDNS_INIT)?ESP_FAIL:ESP_OK; }
-esp_err_t mdns_hostname_set(const char *name) {
-    assert(name); if(failing(FAIL_MDNS_HOSTNAME))return ESP_FAIL;
-    strcpy(s_test_hostname,name); return ESP_OK;
-}
-esp_err_t mdns_hostname_get(char *name) { strcpy(name,s_test_hostname); return ESP_OK; }
-esp_err_t mdns_instance_name_set(const char *name) { assert(name); return failing(FAIL_MDNS_INSTANCE)?ESP_FAIL:ESP_OK; }
-esp_err_t mdns_service_add(const char *instance, const char *service, const char *proto,
-    unsigned port, const void *txt, unsigned count)
-{
-    assert(!instance && service && proto && port == 80 && !txt && count == 0);
-    return failing(FAIL_MDNS_SERVICE)?ESP_FAIL:ESP_OK;
-}
-esp_err_t mdns_query(const char *name,const char *service,const char *proto,uint16_t type,
-    uint32_t timeout,size_t max,mdns_result_t **out)
-{ assert(name && !service && !proto && type==MDNS_TYPE_A && timeout && max); *out=NULL; return ESP_OK; }
-void mdns_query_results_free(mdns_result_t *out) { assert(!out); }
-static void run_worker_at(uint64_t now) { s_now=now; if(!setjmp(s_iteration_done))worker(NULL); }
-
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     static const char *const cases[] = {"none", "nvs", "netif", "event_loop", "radio_init",
-        "storage", "wifi_handler", "ip_handler", "ap_mode", "ap_config", "sta_mode",
-        "radio_start", "worker", "mdns_init", "mdns_hostname", "mdns_instance", "mdns_service"};
+        "storage", "wifi_handler", "ip_handler", "ap_mode", "mac", "ap_config", "sta_mode",
+        "radio_start", "worker"};
     unsigned selected;
     for (selected = 0; selected < sizeof(cases) / sizeof(cases[0]); ++selected)
         if (strcmp(argv[1], cases[selected]) == 0) break;
     assert(selected < sizeof(cases) / sizeof(cases[0]));
-    if (selected>=FAIL_MDNS_INIT) {
-        s_failure=(failure_t)selected;
-        assert(wifi_manager_start()==ESP_OK && s_worker_creations==1);
-        wifi_engine_connected(&s_engine,"home network","10.0.0.22",-40,0);
-        run_worker_at(0);
-        assert(s_status.connected && s_status.ap_active && s_status.can_save);
-        s_failure=FAIL_NONE;
-        run_worker_at(1000); run_worker_at(4000);
-        assert(s_status.connected && !s_status.name_pending && s_status.can_save);
-        assert(!strcmp(s_status.hostname,"p1s-1"));
-        puts("mDNS failure preserves Wi-Fi and setup recovery"); return 0;
-    }
     if (selected == FAIL_NONE) s_event_loop_created = true;
     else {
         s_failure = (failure_t)selected;
@@ -213,7 +186,6 @@ int main(int argc, char **argv)
                 argv[1], attempt, expected, result, s_duplicate_resources);
             assert(result == expected);
             assert(s_worker_creations == 0);
-            assert(!s_mdns_ready);
         }
     }
     s_failure = FAIL_NONE;
@@ -225,6 +197,7 @@ int main(int argc, char **argv)
     wifi_manager_get_status(&status);
     assert(status.can_save && status.configured);
     assert(strcmp(status.ssid, "home network") == 0);
+    assert(strcmp(status.board_id, "7C87CE01020A") == 0);
     const wifi_event_sta_disconnected_t disconnected = {.reason = WIFI_REASON_NO_AP_FOUND};
     s_registered_wifi(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&disconnected);
     assert(s_event.pending && s_event.result == WIFI_RESULT_NO_NETWORK);

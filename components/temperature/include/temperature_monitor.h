@@ -14,7 +14,7 @@ typedef struct {
     size_t count;
     size_t next;
     float calibration_offset_c;
-    float last_raw_c;
+    float last_probe_c;
     uint8_t consecutive_valid;
     uint8_t consecutive_failures;
     uint64_t last_timestamp_ms;

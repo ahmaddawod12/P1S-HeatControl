@@ -9,10 +9,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from validate_firebase_config import validate_firebase_config
+
 IMAGE_NAME = "p1s-heat-controller-esp32-4mb.bin"
+HARDWARE = "esp32-wroom-32-1relay"
 RELEASE_REPOSITORY = "ahmaddawod12/P1S-HeatControl"
 SLOT_BYTES = 0x1F0000
 IDENTITY = struct.Struct("<II24s24s24s32sI")
+NO_FIREBASE_IMAGE_FLAG = 8
 PARTITIONS = {
     "nvs": (1, 2, 0x9000, 0x6000), "phy_init": (1, 1, 0xF000, 0x1000),
     "device_cfg": (1, 2, 0x10000, 0x6000), "otadata": (1, 0, 0x16000, 0x2000),
@@ -39,7 +43,7 @@ def verify_signature(image, public_key):
         "--keyfile", str(public_key), str(image)], capture_output=True, text=True)
     require(result.returncode == 0, "firmware signature verification failed")
 
-def image_metadata(image, public_key, version, personal=False):
+def image_metadata(image, public_key, version):
     stable_version(version)
     image = Path(image)
     require(image.is_file() and 468 <= image.stat().st_size <= SLOT_BYTES, "signed firmware exceeds slot or is too small")
@@ -50,9 +54,10 @@ def image_metadata(image, public_key, version, personal=False):
     require(re.match(r"^v6\.1(?:[.\-]|$)", text(blob[144:176])), "firmware must use ESP-IDF 6.1")
     magic, fmt, product, hardware, layout, embedded, flags = IDENTITY.unpack_from(blob, 288)
     require(magic == 0x31533150 and fmt == 2, "unsupported signed identity")
-    require(flags == (3 if personal else 0), "signed image purpose/credentials do not match this operation")
+    require(not flags & NO_FIREBASE_IMAGE_FLAG, "firmware has no Firebase configuration")
+    require(flags == 0, "signed image purpose/credentials do not match this operation")
     require((text(product), text(hardware), text(layout), text(embedded)) ==
-        ("p1s-heat-controller", "esp32-wroom-32", "p1s-4m-ota-v1", version), "wrong signed board/layout/version")
+        ("p1s-heat-controller", HARDWARE, "p1s-4m-ota-v1", version), "wrong signed board/layout/version")
     verify_signature(image, public_key)
     from esptool.bin_image import LoadFirmwareImage
     try:
@@ -66,7 +71,7 @@ def image_metadata(image, public_key, version, personal=False):
     key_bytes = Path(public_key).read_bytes()
     require(any(key_bytes in segment.data for segment in application.segments),
             "embedded verification key does not match the signing key")
-    return {"format": 1, "product": "p1s-heat-controller", "hardware": "esp32-wroom-32",
+    return {"format": 1, "product": "p1s-heat-controller", "hardware": HARDWARE,
         "layout": "p1s-4m-ota-v1", "version": version, "filename": IMAGE_NAME,
         "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()}
 
@@ -116,6 +121,9 @@ def validate_generic_build(build, version, public_key):
         and description.get("project_version") == version, "wrong project/target/version")
     config = json.loads((build / "config/sdkconfig.json").read_text(encoding="utf-8"))
     require(config.get("P1S_RELEASE_REPOSITORY") == RELEASE_REPOSITORY, "wrong release repository")
+    require(config.get("P1S_FIREBASE_ENABLED") is True and config.get("P1S_FIREBASE_PUBLIC_RELEASE") is True,
+            "only the public Firebase profile can be released")
+    validate_firebase_config(config)
     require(config.get("P1S_WIFI_SSID") == "" and config.get("P1S_WIFI_PASSWORD") == "",
             "release contains personal Wi-Fi configuration")
     require(config.get("IDF_TARGET") == "esp32" and config.get("ESPTOOLPY_FLASHSIZE") == "4MB"
@@ -125,27 +133,6 @@ def validate_generic_build(build, version, public_key):
     entries = [line.split("=", 1)[1] for line in cache.splitlines() if line.startswith("P1S_BOOTSTRAP_CREDENTIALS:")]
     require(entries == ["OFF"], "personal bootstrap builds cannot be released")
     validate_layout(build)
-
-def validate_bootstrap(build_dir, public_key, version):
-    build = Path(build_dir)
-    description = json.loads((build / "project_description.json").read_text(encoding="utf-8"))
-    config = json.loads((build / "config/sdkconfig.json").read_text(encoding="utf-8"))
-    require(config.get("P1S_RELEASE_REPOSITORY") == RELEASE_REPOSITORY, "wrong bootstrap release repository")
-    require(description.get("target") == "esp32" and description.get("project_name") == "p1s_heat_controller"
-        and description.get("project_version") == version, "wrong bootstrap project/target/version")
-    require(config.get("ESPTOOLPY_FLASHSIZE") == "4MB" and config.get("P1S_RELAY_ACTIVE_LOW") is False,
-            "wrong bootstrap hardware profile")
-    validate_update_security(build, description, config, public_key)
-    ssid, password = config.get("P1S_WIFI_SSID", ""), config.get("P1S_WIFI_PASSWORD", "")
-    require(isinstance(ssid, str) and 1 <= len(ssid.encode("utf-8")) <= 32 and isinstance(password, str)
-        and (len(password.encode("utf-8")) == 0 or 8 <= len(password.encode("utf-8")) <= 63),
-        "bootstrap needs valid local Wi-Fi credentials")
-    cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
-    entries = [line.split("=", 1)[1] for line in cache.splitlines() if line.startswith("P1S_BOOTSTRAP_CREDENTIALS:")]
-    require(entries == ["ON"], "expected an explicit personal bootstrap build")
-    validate_layout(build)
-    validate_build_image(build)
-    return image_metadata(build / IMAGE_NAME, public_key, version, personal=True)
 
 def validate_build_image(build, signed_image=None):
     # espsecure v1 appends its 4-byte version and 64-byte ECDSA signature.
@@ -186,15 +173,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--verify-package", type=Path)
-    parser.add_argument("--check-bootstrap", type=Path)
     parser.add_argument("--public-key", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--version", required=True)
     args = parser.parse_args()
     try:
-        if args.check_bootstrap:
-            manifest = validate_bootstrap(args.check_bootstrap, args.public_key, args.version)
-        elif args.verify_package:
+        if args.verify_package:
             manifest = verify_package(args.verify_package, args.public_key, args.version, args.build_dir)
         else:
             require(args.build_dir is not None and args.output is not None, "build directory and output are required")

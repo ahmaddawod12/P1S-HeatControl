@@ -25,7 +25,7 @@ TEST_CASE("MQTT queue has room for a dispatch and an SDK event",
 /* Real coordinator task/mutex; all printer, storage and heat boundaries are
  * synthetic. This case never touches relays or a printer. */
 static atomic_uint begins, ends;
-static atomic_bool active;
+static _Atomic(printer_monitor_phase_t) active_phase;
 static uint64_t now(void *ctx) {
   (void)ctx;
   return (uint64_t)(esp_timer_get_time() / 1000);
@@ -36,27 +36,40 @@ static void heat(app_status_t *out, void *ctx) {
   out->state = HEAT_STATE_HEATING;
   out->enabled = true;
 }
-static esp_err_t monitor_begin(uint64_t until, void *ctx) {
+static esp_err_t monitor_begin(printer_monitor_phase_t phase, uint64_t until,
+                               uint64_t deadline, void *ctx) {
   (void)until;
   (void)ctx;
+  if (deadline && now(NULL) >= deadline) return ESP_ERR_TIMEOUT;
   atomic_fetch_add(&begins, 1);
-  atomic_store(&active, true);
+  atomic_store(&active_phase, phase);
   return ESP_OK;
 }
-static esp_err_t monitor_permit(uint64_t until, void *ctx) {
+static esp_err_t monitor_permit(printer_monitor_phase_t phase, uint64_t until,
+                                void *ctx) {
+  (void)phase;
   (void)until;
   (void)ctx;
-  return atomic_load(&active) ? ESP_OK : ESP_ERR_INVALID_STATE;
+  return atomic_load(&active_phase) != PRINTER_MONITOR_OFF ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
-static void monitor_end(bool disable, void *ctx) {
+static esp_err_t suspend_recovery(void *ctx) {
+  (void)ctx;
+  return ESP_OK;
+}
+static esp_err_t monitor_end(bool disable, uint64_t deadline,
+    const struct app_runtime_enable_guard *guard, uint32_t revision, void *ctx) {
+  (void)guard;
+  (void)revision;
   (void)disable;
   (void)ctx;
+  if (deadline && now(NULL) >= deadline) return ESP_ERR_TIMEOUT;
   atomic_fetch_add(&ends, 1);
-  atomic_store(&active, false);
+  atomic_store(&active_phase, PRINTER_MONITOR_OFF);
+  return ESP_OK;
 }
-static bool monitor_active(void *ctx) {
+static printer_monitor_phase_t monitor_phase(void *ctx) {
   (void)ctx;
-  return atomic_load(&active);
+  return atomic_load(&active_phase);
 }
 static esp_err_t configure(const printer_connection_config_t *value, void *ctx) {
   (void)value;
@@ -102,8 +115,9 @@ TEST_CASE("printer boot restores monitoring readiness without monitoring",
           "[printer_control]") {
   static const printer_control_ops_t ops = {
       .heat_snapshot = heat, .monitor_begin = monitor_begin,
-      .monitor_permit = monitor_permit, .monitor_end = monitor_end,
-      .monitor_active = monitor_active, .link_configure = configure,
+      .monitor_permit = monitor_permit, .monitor_suspend_recovery = suspend_recovery,
+      .monitor_end = monitor_end,
+      .monitor_phase = monitor_phase, .link_configure = configure,
       .link_tick = tick, .link_status = link_status, .load_config = load,
       .save_config = save, .clear_config = clear, .gate_begin = gate_begin,
       .gate_end = gate_end, .now_ms = now};

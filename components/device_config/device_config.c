@@ -9,7 +9,16 @@
 #define DEVICE_NAMESPACE "p1s_device"
 #define WIFI_LEGACY_BYTES 101U
 #define WIFI_BYTES (WIFI_LEGACY_BYTES + DEVICE_NAME_LEN)
+#define FIREBASE_V1_BYTES (4U + DEVICE_FIREBASE_DATABASE_BYTES + DEVICE_FIREBASE_UID_BYTES + DEVICE_FIREBASE_REFRESH_BYTES)
+#define FIREBASE_V2_BYTES (FIREBASE_V1_BYTES + 1U)
+#define FIREBASE_RECOVERY_FLAG_OFFSET (FIREBASE_V2_BYTES + DEVICE_FIREBASE_RECOVERY_KEY_BYTES)
+#define FIREBASE_V3_BYTES (FIREBASE_RECOVERY_FLAG_OFFSET + 1U)
 #define ATTEMPT_BYTES 80U
+#define PILOT_BOOT_KEY "boot_ok_fb_v1"
+#define SETUP_PASSPHRASE_KEY "setup_key_v1"
+
+_Static_assert(offsetof(device_firebase_session_t, pairing_pending) == FIREBASE_V1_BYTES - 4U,
+    "Firebase credentials must retain their original layout");
 
 static atomic_bool s_ready;
 static uint32_t get_u32(const uint8_t *p)
@@ -63,19 +72,114 @@ static esp_err_t write_record(const char *key, const uint8_t *bytes, size_t size
     return err;
 }
 
-esp_err_t device_config_bootstrap_confirmed(void)
+static bool hex_key_valid(const char *key, size_t length)
 {
+    return key && key[length] == '\0' && strspn(key, "0123456789abcdef") == length;
+}
+
+esp_err_t device_config_load_setup_passphrase(char out[DEVICE_SETUP_PASSPHRASE_BYTES])
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    uint8_t record[4U + DEVICE_SETUP_PASSPHRASE_BYTES];
+    const esp_err_t err = read_record(SETUP_PASSPHRASE_KEY, record, sizeof(record));
+    if (err != ESP_OK) return err;
+    if (!hex_key_valid((const char *)record + 4, DEVICE_SETUP_PASSPHRASE_BYTES - 1U)) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    memcpy(out, record + 4, DEVICE_SETUP_PASSPHRASE_BYTES);
+    return ESP_OK;
+}
+
+esp_err_t device_config_save_setup_passphrase(const char passphrase[DEVICE_SETUP_PASSPHRASE_BYTES])
+{
+    if (!hex_key_valid(passphrase, DEVICE_SETUP_PASSPHRASE_BYTES - 1U)) return ESP_ERR_INVALID_ARG;
+    uint8_t record[4U + DEVICE_SETUP_PASSPHRASE_BYTES];
+    put_u32(record, 1);
+    memcpy(record + 4, passphrase, DEVICE_SETUP_PASSPHRASE_BYTES);
+    return write_record(SETUP_PASSPHRASE_KEY, record, sizeof(record));
+}
+
+static bool firebase_session_valid(const device_firebase_session_t *session)
+{
+    return session && session->database_url[0] && session->uid[0] && session->refresh_token[0] &&
+        text_fits(session->database_url, sizeof(session->database_url)) &&
+        text_fits(session->uid, sizeof(session->uid)) &&
+        text_fits(session->refresh_token, sizeof(session->refresh_token));
+}
+
+static bool recovery_key_valid(const char key[DEVICE_FIREBASE_RECOVERY_KEY_BYTES])
+{
+    const size_t length = DEVICE_FIREBASE_RECOVERY_KEY_BYTES - 1U;
+    return hex_key_valid(key, length);
+}
+
+esp_err_t device_config_load_firebase(device_firebase_session_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    uint8_t record[FIREBASE_V3_BYTES];
+    esp_err_t err = read_record_version("firebase_v3", record, sizeof(record), 3);
+    if (err == ESP_ERR_NOT_FOUND) err = read_record_version("firebase_v2", record, FIREBASE_V2_BYTES, 2);
+    if (err == ESP_ERR_NOT_FOUND) err = read_record("firebase_v1", record, FIREBASE_V1_BYTES);
+    if (err != ESP_OK) return err;
+    const uint32_t version = get_u32(record);
+    device_firebase_session_t session = {0};
+    memcpy(&session, record + 4, FIREBASE_V1_BYTES - 4U);
+    if (version >= 2) {
+        if (record[FIREBASE_V1_BYTES] > 1) return ESP_ERR_INVALID_RESPONSE;
+        session.pairing_pending = record[FIREBASE_V1_BYTES] == 1;
+    }
+    if (version == 3) {
+        memcpy(session.recovery_key, record + FIREBASE_V2_BYTES, sizeof(session.recovery_key));
+        if (!recovery_key_valid(session.recovery_key) || record[FIREBASE_RECOVERY_FLAG_OFFSET] > 1) {
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+        session.recovery_pending = record[FIREBASE_RECOVERY_FLAG_OFFSET] == 1;
+    }
+    if (!firebase_session_valid(&session)) return ESP_ERR_INVALID_RESPONSE;
+    *out = session;
+    return ESP_OK;
+}
+
+esp_err_t device_config_save_firebase(const device_firebase_session_t *session)
+{
+    if (!firebase_session_valid(session) || !recovery_key_valid(session->recovery_key)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t record[FIREBASE_V3_BYTES] = {0};
+    put_u32(record, 3);
+    memcpy(record + 4, session, FIREBASE_V1_BYTES - 4U);
+    record[FIREBASE_V1_BYTES] = session->pairing_pending;
+    memcpy(record + FIREBASE_V2_BYTES, session->recovery_key, sizeof(session->recovery_key));
+    record[FIREBASE_RECOVERY_FLAG_OFFSET] = session->recovery_pending;
+    return write_record("firebase_v3", record, sizeof(record));
+}
+
+esp_err_t device_config_bootstrap_confirmed(const uint8_t *pilot_image_hash)
+{
+    if (pilot_image_hash) {
+        uint8_t record[4 + DEVICE_BOOTSTRAP_HASH_BYTES];
+        const esp_err_t err = read_record(PILOT_BOOT_KEY, record, sizeof(record));
+        if (err != ESP_OK) return err;
+        return memcmp(record + 4, pilot_image_hash, DEVICE_BOOTSTRAP_HASH_BYTES) == 0
+            ? ESP_OK : ESP_ERR_NOT_FOUND;
+    }
     uint8_t bytes[8];
     const esp_err_t err = read_record("boot_ok_v1", bytes, sizeof(bytes));
     if (err != ESP_OK) return err;
     return get_u32(bytes + 4) == 1 ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
 
-esp_err_t device_config_confirm_bootstrap(void)
+esp_err_t device_config_confirm_bootstrap(const uint8_t *pilot_image_hash)
 {
-    const esp_err_t existing = device_config_bootstrap_confirmed();
+    const esp_err_t existing = device_config_bootstrap_confirmed(pilot_image_hash);
     if (existing == ESP_OK) return ESP_OK;
     if (existing != ESP_ERR_NOT_FOUND) return existing;
+    if (pilot_image_hash) {
+        uint8_t record[4 + DEVICE_BOOTSTRAP_HASH_BYTES] = {0};
+        put_u32(record, 1);
+        memcpy(record + 4, pilot_image_hash, DEVICE_BOOTSTRAP_HASH_BYTES);
+        return write_record(PILOT_BOOT_KEY, record, sizeof(record));
+    }
     uint8_t bytes[8] = {0}; put_u32(bytes, 1); put_u32(bytes + 4, 1);
     return write_record("boot_ok_v1", bytes, sizeof(bytes));
 }

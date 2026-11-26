@@ -6,10 +6,10 @@ idf_component_register(
         board
         runtime
         settings
-        web_server
         wifi_manager
         nvs_flash
         firmware_update
+        firebase_client
         printer_link
         printer_control
 )

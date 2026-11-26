@@ -10,17 +10,25 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "lwip/sockets.h"
 #include <stdatomic.h>
 #include <string.h>
 
-static atomic_bool s_pending, s_started, s_startup_done;
+static atomic_bool s_pending, s_started, s_startup_done, s_cloud_storage_ready;
 static atomic_uint s_progress_ms;
 static esp_task_wdt_user_handle_t s_watchdog;
-static bool s_needs_confirmation, s_personal, s_ota_valid, s_boot_gate;
+static bool s_needs_confirmation, s_requires_marker, s_ota_valid, s_boot_gate;
 static bool s_rollback_available, s_trial_reserved;
+
+static const uint8_t *bootstrap_image_hash(void)
+{
+    _Static_assert(sizeof(((esp_app_desc_t *) 0)->app_elf_sha256) == DEVICE_BOOTSTRAP_HASH_BYTES,
+                   "bootstrap marker must store the full ELF hash");
+    return esp_app_get_description()->app_elf_sha256;
+}
+
 static uint32_t now_ms(void) { return (uint32_t) (esp_timer_get_time() / 1000); }
 bool firmware_trial_pending(void) { return atomic_load(&s_pending); }
 void firmware_trial_startup_progress(void) { atomic_store(&s_progress_ms, now_ms()); }
@@ -46,7 +54,7 @@ static void fail_trial(void)
 
 void firmware_trial_startup_complete(esp_err_t result)
 {
-    atomic_store(&s_startup_done, true);
+    atomic_store(&s_startup_done, result == ESP_OK);
     firmware_trial_startup_progress();
     if (result != ESP_OK && !atomic_load(&s_started)) {
         const esp_partition_t *running = esp_ota_get_running_partition();
@@ -56,27 +64,9 @@ void firmware_trial_startup_complete(esp_err_t result)
     }
 }
 
-static bool http_alive(void)
+void firmware_trial_note_cloud_storage_ready(bool ready)
 {
-    const int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0) return false;
-    const struct timeval timeout = {.tv_sec = 1};
-    (void) setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    (void) setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(80)};
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    static const char request[] = "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    char response[64] = {0};
-    bool ok = connect(sock, (struct sockaddr *) &address, sizeof(address)) == 0 &&
-        send(sock, request, sizeof(request) - 1, 0) == sizeof(request) - 1;
-    size_t used = 0;
-    while (ok && used < 12) {
-        const int n = recv(sock, response + used, sizeof(response) - 1 - used, 0);
-        if (n <= 0) { ok = false; break; }
-        used += (size_t) n;
-    }
-    close(sock);
-    return ok && strncmp(response, "HTTP/1.1 200", 12) == 0;
+    atomic_store(&s_cloud_storage_ready, ready);
 }
 
 static void reconcile(void)
@@ -106,7 +96,8 @@ static void reconcile(void)
 static void supervisor(void *arg)
 {
     (void) arg;
-    const uint32_t started = now_ms();
+    uint32_t started = now_ms();
+    const uint8_t *pilot_image_hash = bootstrap_image_hash();
     bool setup_wait=false;
     while (true) {
         app_status_t status; app_runtime_get_status(&status);
@@ -118,54 +109,55 @@ static void supervisor(void *arg)
             (fresh && sensor_fresh))) (void) esp_task_wdt_reset_user(s_watchdog);
         device_wifi_credentials_t credentials;
         settings_data_t settings; settings_load_result_t loaded;
-        const bool storage = device_config_load_wifi(&credentials) == ESP_OK &&
+        const esp_err_t wifi_record = device_config_load_wifi(&credentials);
+        const bool storage = (wifi_record == ESP_OK || wifi_record == ESP_ERR_NOT_FOUND) &&
             settings_load(&settings, &loaded) == ESP_OK && loaded != SETTINGS_LOAD_RECOVERED_CORRUPT;
         /* IDF marks the first empty OTA slot VALID before application startup.
-         * Only our committed marker proves the personal bootstrap passed its
+         * Our committed image marker records that the pilot passed its
          * local checks. Once present, ordinary boots need no router. */
-        if (s_needs_confirmation && s_personal && s_ota_valid &&
-            device_config_bootstrap_confirmed() == ESP_OK) {
+        if (s_needs_confirmation && s_requires_marker && s_ota_valid &&
+            device_config_bootstrap_confirmed(pilot_image_hash) == ESP_OK) {
             s_needs_confirmation = false;
-            atomic_store(&s_pending, false);
-            detach_watchdog();
-            release_trial();
+            started = now_ms();
         }
         if (!s_needs_confirmation) {
             if (s_boot_gate) {
-                if (fresh && app_runtime_end_maintenance() == ESP_OK) s_boot_gate = false;
-                else {
+                if (!fresh || app_runtime_end_maintenance() != ESP_OK) {
                     if (now_ms() - started >= 120000) {
                         firmware_update_note_boot_result(FIRMWARE_RESULT_UNSAFE); break;
                     }
                     vTaskDelay(pdMS_TO_TICKS(250)); continue;
                 }
+                s_boot_gate = false;
+                detach_watchdog();
             }
             if (storage) { reconcile(); break; }
             if (now_ms() - started >= 120000) break;
         } else {
-            wifi_manager_status_t wifi; wifi_manager_get_status(&wifi);
-            firmware_health_t health = {.outputs_safe = !status.enabled && !status.heater_on && !status.fan_on,
+            firmware_health_t health = {.maintenance_ready = app_runtime_maintenance_ready(),
                 .storage_ready = storage, .runtime_fresh = fresh, .sensor_fresh = sensor_fresh,
-                .wifi_ready = wifi.connected, .fatal = status.fault == HEAT_FAULT_OUTPUT_INIT || status.fault == HEAT_FAULT_NVS};
-            if (atomic_load(&s_startup_done) && fresh && sensor_fresh && wifi.connected) health.http_ready = http_alive();
+                .fatal = status.fault == HEAT_FAULT_OUTPUT_INIT || status.fault == HEAT_FAULT_NVS};
+            wifi_manager_status_t wifi; wifi_manager_get_status(&wifi);
+            health.local_services_ready = atomic_load(&s_startup_done);
+            health.cloud_storage_ready = atomic_load(&s_cloud_storage_ready);
+            health.recovery_ready = wifi.setup_mode == WIFI_SETUP_NONE
+                ? wifi.connected : wifi.setup_portal_ready;
             const firmware_trial_action_t action = firmware_trial_evaluate_boot(&health,
                 now_ms() - started, true, s_rollback_available);
             if (action == FIRMWARE_TRIAL_CONFIRM) {
                 const esp_partition_t *running = esp_ota_get_running_partition();
                 esp_ota_img_states_t state;
-                esp_err_t err = s_personal ? device_config_confirm_bootstrap() : ESP_OK;
+                esp_err_t err = s_requires_marker ? device_config_confirm_bootstrap(pilot_image_hash) : ESP_OK;
                 if (err != ESP_OK) { fail_trial(); break; }
                 err = esp_ota_get_state_partition(running, &state);
                 if (err != ESP_OK || state == ESP_OTA_IMG_UNDEFINED) err = esp_ota_set_boot_partition(running);
                 if (err == ESP_OK) err = esp_ota_mark_app_valid_cancel_rollback();
                 if (err != ESP_OK) { fail_trial(); break; }
-                atomic_store(&s_pending, false);
+                /* Give the confirmed image time to release maintenance if
+                 * admission is temporarily busy after the OTA writes. */
+                s_needs_confirmation = false;
+                started = now_ms();
                 firmware_update_note_boot_result(FIRMWARE_RESULT_INSTALLED);
-                reconcile();
-                if (app_runtime_end_maintenance() != ESP_OK)
-                    firmware_update_note_boot_result(FIRMWARE_RESULT_UNSAFE);
-                release_trial();
-                break;
             }
             if (action == FIRMWARE_TRIAL_REJECT) { fail_trial(); break; }
             if (action == FIRMWARE_TRIAL_SETUP_WAIT && !setup_wait) {
@@ -177,6 +169,8 @@ static void supervisor(void *arg)
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     detach_watchdog();
+    if (!s_needs_confirmation) atomic_store(&s_pending, false);
+    release_trial();
     vTaskDelete(NULL);
 }
 
@@ -186,9 +180,14 @@ esp_err_t firmware_trial_start(void)
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
     const esp_err_t read = running ? esp_ota_get_state_partition(running, &state) : ESP_ERR_NOT_FOUND;
-    s_personal = (custom_app_desc.image_flags & FIRMWARE_IMAGE_PERSONAL) != 0;
+#ifdef CONFIG_P1S_FIREBASE_PUBLIC_RELEASE
+    s_requires_marker = true;
+#else
+    s_requires_marker = firmware_boot_requires_marker(custom_app_desc.image_flags);
+#endif
     s_ota_valid = read == ESP_OK && state == ESP_OTA_IMG_VALID;
-    s_needs_confirmation = firmware_boot_needs_confirmation(s_ota_valid, s_personal, false);
+    s_needs_confirmation = firmware_boot_needs_confirmation(s_ota_valid, s_requires_marker,
+                                                            bootstrap_image_hash());
     s_boot_gate = s_needs_confirmation;
     s_rollback_available=esp_ota_check_rollback_is_possible();
     atomic_store(&s_pending, s_needs_confirmation);

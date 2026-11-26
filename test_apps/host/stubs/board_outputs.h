@@ -3,5 +3,5 @@
 #include "esp_err.h"
 typedef struct { int unused; } board_outputs_config_t;
 esp_err_t board_outputs_init(const board_outputs_config_t *);
-esp_err_t board_outputs_set(bool heater, bool fan);
+esp_err_t board_outputs_set(bool on);
 esp_err_t board_outputs_force_off(void);

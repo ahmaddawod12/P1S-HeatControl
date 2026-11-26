@@ -1,32 +1,17 @@
 idf_component_register(
     SRCS
-        "api_contract.c"
+        "http_csrf.c"
         "http_request.c"
-        "sse_hub.c"
-        "web_server.c"
-        "firmware_api.c"
-        "firmware_api_policy.c"
-        "wifi_api.c"
+        "setup_portal.c"
         "wifi_api_policy.c"
-        "printer_api.c"
-        "printer_api_policy.c"
     INCLUDE_DIRS "include"
-    REQUIRES
-        app_types
-        diagnostics
-        esp_http_server
-        esp_wifi
-        wifi_manager
     PRIV_REQUIRES
-        controller
-        settings
-        runtime
-        firmware_update
-        printer_control
-        device_config
+        esp_http_server
         esp_hw_support
+        esp_netif
         esp_timer
         lwip
         espressif__cjson
         web
+        wifi_manager
 )

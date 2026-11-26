@@ -17,7 +17,7 @@ static esp_err_t s_nvs_result;
 static esp_err_t s_settings_result;
 static esp_err_t s_runtime_result;
 static esp_err_t s_wifi_result;
-static esp_err_t s_web_result;
+static esp_err_t s_firebase_result;
 
 static void note(const char *name)
 {
@@ -58,17 +58,17 @@ static esp_err_t fake_wifi_start(void)
     return s_wifi_result;
 }
 
-static esp_err_t fake_web_start(void)
+static esp_err_t fake_firebase_start(void)
 {
-    note("web_server_start");
-    return s_web_result;
+    note("firebase_client_start");
+    return s_firebase_result;
 }
 static esp_err_t fake_printer_failure(void) { note("printer_start");return ESP_ERR_NO_MEM; }
 TEST_CASE("optional printer failure is nonfatal", "[startup]") {
     app_startup_ops_t ops=fake_ops();
     ops.printer_start=fake_printer_failure;
-    TEST_ESP_OK(app_startup_run(&ops));
-    TEST_ASSERT_EQUAL_STRING("web_server_start",s_log[5]);
+    TEST_ESP_OK(app_startup_run(&ops, NULL));
+    TEST_ASSERT_EQUAL_STRING("firebase_client_start",s_log[5]);
     TEST_ASSERT_EQUAL_STRING("printer_start",s_log[6]);
     TEST_ASSERT_EQUAL_UINT32(7,s_count);
 }
@@ -94,7 +94,7 @@ static app_startup_ops_t fake_ops(void)
     s_settings_result = ESP_OK;
     s_runtime_result = ESP_OK;
     s_wifi_result = ESP_OK;
-    s_web_result = ESP_OK;
+    s_firebase_result = ESP_OK;
 
     return (app_startup_ops_t) {
         .board_outputs_init = fake_board_init,
@@ -102,7 +102,7 @@ static app_startup_ops_t fake_ops(void)
         .settings_init = fake_settings_init,
         .runtime_start = fake_runtime_start,
         .wifi_start = fake_wifi_start,
-        .web_server_start = fake_web_start,
+        .firebase_start = fake_firebase_start,
         .board_outputs_force_off = fake_force_off,
         .report_startup_fault = fake_report_fault,
     };
@@ -120,7 +120,7 @@ TEST_CASE("startup brings services up in a safe order", "[startup]")
 {
     app_startup_ops_t ops = fake_ops();
 
-    TEST_ESP_OK(app_startup_run(&ops));
+    TEST_ESP_OK(app_startup_run(&ops, NULL));
 
     static const char *const k_expected[] = {
         "board_outputs_init",
@@ -128,7 +128,7 @@ TEST_CASE("startup brings services up in a safe order", "[startup]")
         "settings_init",
         "app_runtime_start",
         "wifi_manager_start",
-        "web_server_start",
+        "firebase_client_start",
     };
     /* Exact equality also proves nothing enabled regulation on the way up. */
     assert_sequence(k_expected, sizeof(k_expected) / sizeof(k_expected[0]));
@@ -139,7 +139,7 @@ TEST_CASE("a relay init failure stops startup with outputs off", "[startup]")
     app_startup_ops_t ops = fake_ops();
     s_board_result = ESP_ERR_INVALID_STATE;
 
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, app_startup_run(&ops));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, app_startup_run(&ops, NULL));
 
     static const char *const k_expected[] = {
         "board_outputs_init",
@@ -153,7 +153,7 @@ TEST_CASE("a runtime failure stops before networking", "[startup]")
     app_startup_ops_t ops = fake_ops();
     s_runtime_result = ESP_ERR_NO_MEM;
 
-    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, app_startup_run(&ops));
+    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, app_startup_run(&ops, NULL));
 
     static const char *const k_expected[] = {
         "board_outputs_init",
@@ -171,7 +171,7 @@ TEST_CASE("networking failure keeps the runtime alive", "[startup]")
     s_wifi_result = ESP_ERR_INVALID_STATE;
 
     /* Regulation survives; the caller retries networking. */
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, app_startup_run(&ops));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, app_startup_run(&ops, NULL));
 
     static const char *const k_expected[] = {
         "board_outputs_init",
@@ -180,17 +180,17 @@ TEST_CASE("networking failure keeps the runtime alive", "[startup]")
         "app_runtime_start",
         "wifi_manager_start",
         "board_outputs_force_off",
-        "web_server_start",
+        "firebase_client_start",
     };
     assert_sequence(k_expected, sizeof(k_expected) / sizeof(k_expected[0]));
 }
 
-TEST_CASE("a web server failure forces outputs off", "[startup]")
+TEST_CASE("a Firebase startup failure forces outputs off", "[startup]")
 {
     app_startup_ops_t ops = fake_ops();
-    s_web_result = ESP_ERR_NO_MEM;
+    s_firebase_result = ESP_ERR_NO_MEM;
 
-    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, app_startup_run(&ops));
+    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, app_startup_run(&ops, NULL));
 
     static const char *const k_expected[] = {
         "board_outputs_init",
@@ -198,7 +198,7 @@ TEST_CASE("a web server failure forces outputs off", "[startup]")
         "settings_init",
         "app_runtime_start",
         "wifi_manager_start",
-        "web_server_start",
+        "firebase_client_start",
         "board_outputs_force_off",
     };
     assert_sequence(k_expected, sizeof(k_expected) / sizeof(k_expected[0]));
@@ -210,7 +210,7 @@ TEST_CASE("settings recovery never blocks startup", "[startup]")
     s_settings_result = ESP_ERR_NVS_NOT_FOUND;
 
     /* The runtime latches HEAT_FAULT_NVS itself; startup carries on. */
-    TEST_ESP_OK(app_startup_run(&ops));
+    TEST_ESP_OK(app_startup_run(&ops, NULL));
 
     static const char *const k_expected[] = {
         "board_outputs_init",
@@ -218,7 +218,7 @@ TEST_CASE("settings recovery never blocks startup", "[startup]")
         "settings_init",
         "app_runtime_start",
         "wifi_manager_start",
-        "web_server_start",
+        "firebase_client_start",
     };
     assert_sequence(k_expected, sizeof(k_expected) / sizeof(k_expected[0]));
 }
@@ -228,7 +228,7 @@ TEST_CASE("startup rejects an incomplete operations table", "[startup]")
     app_startup_ops_t ops = fake_ops();
     ops.runtime_start = NULL;
 
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, app_startup_run(&ops));
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, app_startup_run(NULL));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, app_startup_run(&ops, NULL));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, app_startup_run(NULL, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, s_count);
 }

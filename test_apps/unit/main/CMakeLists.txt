@@ -12,11 +12,7 @@ idf_component_register(
         "test_runtime.c"
         "test_wifi_config.c"
         "test_diagnostics.c"
-        "test_api_contract.c"
-        "test_printer_api.c"
         "test_printer_control.c"
-        "test_web_server.c"
-        "test_web_assets.c"
         "test_app_startup.c"
     PRIV_REQUIRES
         unity
@@ -34,17 +30,14 @@ idf_component_register(
         runtime
         wifi_manager
         diagnostics
-        web_server
-        web
         app_startup
         nvs_flash
+        esp_hw_support
         esp_timer
-        esp_http_server
         lwip
         esp_netif
         esp_event
         espressif__cjson
         espressif__mqtt
     WHOLE_ARCHIVE
-    PRIV_INCLUDE_DIRS "../../../components/web_server"
 )

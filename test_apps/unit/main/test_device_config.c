@@ -99,18 +99,18 @@ TEST_CASE("bootstrap health confirmation needs an explicit persistent marker", "
     (void) nvs_flash_deinit_partition("device_cfg");
     TEST_ESP_OK(nvs_flash_erase_partition("device_cfg"));
     TEST_ESP_OK(device_config_init());
-    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, device_config_bootstrap_confirmed());
-    TEST_ESP_OK(device_config_confirm_bootstrap());
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, device_config_bootstrap_confirmed(NULL));
+    TEST_ESP_OK(device_config_confirm_bootstrap(NULL));
     TEST_ESP_OK(nvs_flash_deinit_partition("device_cfg"));
     TEST_ESP_OK(device_config_init());
-    TEST_ESP_OK(device_config_bootstrap_confirmed());
+    TEST_ESP_OK(device_config_bootstrap_confirmed(NULL));
     nvs_handle_t handle;
     TEST_ESP_OK(nvs_open_from_partition("device_cfg", "p1s_device", NVS_READWRITE, &handle));
     const uint8_t future[8] = {2,0,0,0,1};
     TEST_ESP_OK(nvs_set_blob(handle, "boot_ok_v1", future, sizeof(future)));
     TEST_ESP_OK(nvs_commit(handle));
     nvs_close(handle);
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, device_config_confirm_bootstrap());
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_RESPONSE, device_config_confirm_bootstrap(NULL));
     TEST_ESP_OK(nvs_flash_deinit_partition("device_cfg"));
     TEST_ESP_OK(nvs_flash_erase_partition("device_cfg"));
 }

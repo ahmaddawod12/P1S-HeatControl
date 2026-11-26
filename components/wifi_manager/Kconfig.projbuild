@@ -4,9 +4,8 @@ config P1S_WIFI_SSID
     string "Wi-Fi SSID"
     default ""
     help
-        Name of the network the controller joins at boot. The controller is
-        station-only, so a board built without this never reaches the network
-        and its web UI stays unreachable. Heat regulation is unaffected.
+        Optional Wi-Fi network for a personal Firebase bootstrap. Without a
+        saved or compiled network the controller starts its setup hotspot.
 
         Supply this through the gitignored sdkconfig.secret, never through
         sdkconfig.defaults, which is tracked in Git.

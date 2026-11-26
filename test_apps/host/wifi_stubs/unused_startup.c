@@ -8,7 +8,6 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/task.h"
-#include "mdns.h"
 #include "nvs_flash.h"
 
 #define UNAVAILABLE() (assert(!"native startup is unavailable in this test"), ESP_FAIL)
@@ -24,6 +23,8 @@ esp_err_t esp_event_handler_instance_register(esp_event_base_t base, int32_t id,
 esp_err_t esp_wifi_init(const wifi_init_config_t *config)
 { (void)config; return UNAVAILABLE(); }
 esp_err_t esp_wifi_set_storage(int storage) { (void)storage; return UNAVAILABLE(); }
+esp_err_t esp_wifi_get_mac(int interface, uint8_t mac[6])
+{ (void)interface; (void)mac; return UNAVAILABLE(); }
 esp_err_t esp_wifi_start(void) { return UNAVAILABLE(); }
 esp_err_t device_config_init(void) { return UNAVAILABLE(); }
 esp_err_t device_config_load_wifi(device_wifi_credentials_t *out)

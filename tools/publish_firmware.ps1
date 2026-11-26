@@ -58,7 +58,7 @@ try {
         Copy-Item -LiteralPath $p1sReleaseNotes -Destination $p1sNotesPath
     } else {
         @"
-Signed firmware $Version for the classic ESP32-WROOM-32 P1S controller with 4 MB flash and active-high relays (OFF=LOW, ON=HIGH). Both relays start OFF.
+Signed firmware $Version for the classic ESP32-WROOM-32 P1S controller with 4 MB flash and one active-high GPIO16 relay for the heater and fan (OFF=LOW, ON=HIGH). The relay starts off.
 
 Use the dashboard's Update firmware button after the initial USB OTA bootstrap. Heating stays disabled after installation. firmware.json describes the signed application and its SHA-256 digest.
 

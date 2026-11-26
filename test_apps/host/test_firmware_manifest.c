@@ -4,7 +4,7 @@
 #include <string.h>
 
 static const char good[] = "{\"format\":1,\"product\":\"p1s-heat-controller\","
-    "\"hardware\":\"esp32-wroom-32\",\"layout\":\"p1s-4m-ota-v1\","
+    "\"hardware\":\"" FIRMWARE_HARDWARE "\",\"layout\":\"p1s-4m-ota-v1\","
     "\"version\":\"1.0.1\",\"filename\":\"p1s-heat-controller-esp32-4mb.bin\","
     "\"size\":512,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
 static const char release[] = "{\"tag_name\":\"v1.0.1\",\"draft\":false,\"prerelease\":false,\"assets\":["

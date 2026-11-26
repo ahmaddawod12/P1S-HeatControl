@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f3f4ef">
+    <title>P1S Heat Control</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">P1S</span> Heat Control</div>
+        <div class="account" id="account" hidden>
+          <span id="account-name"></span>
+          <button type="button" id="sign-out" class="button button-small">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="sign-in-view" class="public-view">
+      <section class="sign-in-card" aria-labelledby="sign-in-heading">
+        <h1 id="sign-in-heading">Chamber control</h1>
+        <p>Sign in to pair your P1S controller, check its temperature, and manage heating.</p>
+        <form id="sign-in-form" method="post">
+          <label for="sign-in-email">Email</label>
+          <input id="sign-in-email" name="email" type="email" autocomplete="username" required>
+          <label for="sign-in-password">Password</label>
+          <input id="sign-in-password" name="password" type="password" autocomplete="current-password" required>
+          <button id="sign-in" class="button button-primary" type="submit" disabled>Sign in</button>
+          <p class="feedback" id="sign-in-error" role="status">Connecting to Firebase…</p>
+        </form>
+      </section>
+    </main>
+
+    <div class="workspace" id="workspace" hidden>
+      <aside class="device-rail" aria-label="Controllers">
+        <div class="rail-heading">
+          <h2>Controllers</h2>
+          <button class="button button-small" id="open-pairing" type="button">Pair controller</button>
+        </div>
+        <ul class="device-list" id="devices"></ul>
+      </aside>
+
+      <main class="main-panel">
+        <p class="banner error" role="status" id="workspace-error" hidden></p>
+        <p class="banner" role="status" id="pairing-status" hidden></p>
+        <section class="panel empty-state" id="empty-workspace" aria-labelledby="empty-heading">
+          <h1 id="empty-heading">Pair your first controller</h1>
+          <p id="pair-first-help">Use the code shown on the controller’s Wi-Fi setup page.</p>
+          <button class="button button-primary" id="pair-first" type="button">Pair controller</button>
+        </section>
+
+        <div id="device-view" hidden>
+          <div class="device-heading">
+            <div>
+              <h1 id="device-name">Controller</h1>
+              <p class="device-meta">
+                <span id="device-id" class="device-id"></span>
+                <span id="last-seen" class="last-seen"></span>
+              </p>
+            </div>
+            <span id="freshness" class="badge" role="status"></span>
+          </div>
+          <p class="banner" role="status" id="availability" hidden></p>
+
+          <section class="metrics" aria-label="Chamber status">
+            <article class="panel temperature-panel">
+              <h2>Chamber temperature</h2>
+              <p class="metric-value" id="temperature">—</p>
+              <div class="temperature-scale" id="temperature-scale" hidden aria-hidden="true">
+                <div class="scale-track"><span></span><i></i></div>
+                <div class="scale-labels"><span>0 °C</span><span>80 °C</span></div>
+              </div>
+              <p class="metric-note" id="temperature-note"></p>
+            </article>
+            <article class="panel">
+              <h2>Target</h2>
+              <p class="metric-value" id="target">—</p>
+              <p class="metric-note" id="heat-mode"></p>
+            </article>
+            <article class="panel">
+              <h2>Heater output</h2>
+              <p class="metric-value output-value" id="heater">—</p>
+              <p class="metric-note" id="heat-state"></p>
+            </article>
+          </section>
+
+          <div class="control-grid">
+            <section class="panel" aria-labelledby="heat-heading">
+              <h2 id="heat-heading">Heating</h2>
+              <div class="button-row heat-actions">
+                <button type="button" class="button button-primary" data-command="heat.enable">Enable heat</button>
+                <button type="button" class="button button-stop" data-command="heat.disable">Disable heat</button>
+              </div>
+              <form class="setting-row" id="target-form">
+                <label for="target-input">Target temperature</label>
+                <div class="field-actions">
+                  <div class="unit-input"><input id="target-input" type="number" min="0" max="80" step="0.5" required><span aria-hidden="true">°C</span></div>
+                  <button class="button" type="submit">Set target</button>
+                </div>
+              </form>
+              <p class="banner" id="high-target-warning" role="status" hidden>
+                Targets above 60 °C exceed the usual chamber range. Check that your material and enclosure can handle the temperature.
+              </p>
+              <form class="setting-row" id="restart-form" hidden>
+                <label for="restart-input">Restart heating at</label>
+                <div class="field-actions">
+                  <div class="unit-input"><input id="restart-input" type="number" step="0.5" aria-describedby="restart-help" required><span aria-hidden="true">°C</span></div>
+                  <button class="button" type="submit">Set restart temperature</button>
+                </div>
+                <p class="metric-note" id="restart-help">Choose 0.5–20 °C below the target. The gap follows target changes.</p>
+              </form>
+              <form class="setting-row" id="calibration-form">
+                <label for="calibration-input">Sensor calibration offset</label>
+                <div class="field-actions">
+                  <div class="unit-input"><input id="calibration-input" type="number" min="-10" max="10" step="any" required><span aria-hidden="true">°C</span></div>
+                  <button class="button" type="submit">Set calibration</button>
+                </div>
+              </form>
+              <div class="detail-row fault-row">
+                <div><span class="detail-label">Fault</span><strong id="fault">—</strong></div>
+                <button type="button" class="button" data-command="heat.ackFault">Acknowledge fault</button>
+              </div>
+            </section>
+
+            <div class="detail-panels">
+              <section class="panel" aria-labelledby="printer-heading">
+                <h2 id="printer-heading">Printer</h2>
+                <dl class="details">
+                  <div><dt>Connection</dt><dd id="printer-connection">—</dd></div>
+                  <div><dt>Print state</dt><dd id="printer-state">—</dd></div>
+                  <div><dt>Monitor P1S</dt><dd id="monitor-phase">—</dd></div>
+                </dl>
+                <div class="button-row">
+                  <button type="button" class="button" data-command="printer.monitorStart">Start Monitor P1S</button>
+                  <button type="button" class="button" data-command="printer.monitorStop">Stop monitoring (keeps heating)</button>
+                </div>
+              </section>
+
+              <section class="panel" aria-labelledby="firmware-heading">
+                <h2 id="firmware-heading">Firmware</h2>
+                <dl class="details">
+                  <div><dt>Installed version</dt><dd id="firmware-version">—</dd></div>
+                  <div><dt>Update status</dt><dd id="update-phase">—</dd></div>
+                  <div><dt>Free RAM</dt><dd id="free-ram">—</dd></div>
+                  <div><dt>Heap low-water mark</dt><dd id="heap-low-water">—</dd></div>
+                </dl>
+                <progress id="update-progress" max="1" value="0" aria-label="Firmware update progress" hidden></progress>
+                <p class="metric-note" id="update-result" hidden></p>
+                <button type="button" class="button" id="firmware-update" data-command="firmware.update" hidden disabled>Check and install update</button>
+              </section>
+            </div>
+          </div>
+
+          <section class="panel command-panel" aria-labelledby="commands-heading">
+            <h2 id="commands-heading">Command results</h2>
+            <p id="empty-results">Commands and controller replies will appear here.</p>
+            <ol class="result-list" id="command-results" aria-live="polite"></ol>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="pair-dialog" aria-labelledby="pair-title">
+      <form id="pair-form">
+        <div class="dialog-heading">
+          <h2 id="pair-title">Pair controller</h2>
+          <button class="button button-small" type="button" id="close-pairing">Close</button>
+        </div>
+        <p>Join the controller’s <strong>P1S-Heat-Setup</strong> hotspot and open <strong>192.168.4.1</strong>. The hotspot’s suffix matches the board ID on its setup page. Copy the pairing code, then return to a network with internet access.</p>
+        <label for="pair-code">Pairing code</label>
+        <input id="pair-code" name="code" class="code-input" minlength="8" maxlength="8" required autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <p class="feedback" id="pair-error" role="status"></p>
+        <button class="button button-primary" id="pair-submit" type="submit">Pair controller</button>
+      </form>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

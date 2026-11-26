@@ -89,8 +89,77 @@ static void frames_reassemble(void) {
   printer_report_t r;
   assert(len == total && printer_report_parse(out, len, &r) == ESP_OK);
   assert(r.state == PRINTER_RUN_FINISHED);
+  printer_frame_clear(&frame);
+  assert(frame.bytes == NULL);
   assert(printer_frame_feed(&frame, &b, &out, &len) == PRINTER_FRAME_REJECTED);
 }
+
+static void complete_reports_borrow_input(void) {
+  printer_frame_t frame = {0};
+  const char json[] = "{\"print\":{\"gcode_state\":\"IDLE\"}}";
+  const char topic[] = "device/X/report";
+  printer_fragment_t part = {
+      .topic = topic, .topic_len = sizeof(topic) - 1U, .data = json,
+      .total = sizeof(json) - 1U, .len = 5U, .epoch = 1U,
+  };
+  const char *report = NULL;
+  size_t report_len = 0;
+  assert(printer_frame_feed(&frame, &part, &report, &report_len) == PRINTER_FRAME_PENDING);
+  assert(frame.bytes != NULL);
+
+  /* A fresh report discards a partial frame from the old connection. */
+  part.epoch = 2U;
+  part.len = part.total;
+  assert(printer_frame_feed(&frame, &part, &report, &report_len) == PRINTER_FRAME_COMPLETE);
+  assert(report == json && report_len == sizeof(json) - 1U && frame.bytes == NULL);
+  printer_frame_clear(&frame);
+}
+
+static void maximum_size_frames_reassemble_repeatedly(void) {
+  static printer_frame_t frame;
+  static char payload[PRINTER_REPORT_MAX];
+  const char prefix[] = "{\"print\":{\"command\":\"push_status\",\"description\":\"";
+  const char suffix[] = "\",\"gcode_state\":\"RUNNING\"}}";
+  const size_t start = sizeof(prefix) - 1U;
+  const size_t end = sizeof(payload) - (sizeof(suffix) - 1U);
+  memcpy(payload, prefix, start);
+  memset(payload + start, 'x', end - start);
+  memcpy(payload + end, suffix, sizeof(suffix) - 1U);
+
+  const char *report = NULL;
+  size_t report_len = 0;
+  const char topic[] = "device/X/report";
+  const printer_fragment_t oversized = {
+      .topic = topic, .topic_len = sizeof(topic) - 1U,
+      .data = payload, .len = 1, .total = sizeof(payload) + 1U,
+  };
+  assert(printer_frame_feed(&frame, &oversized, &report, &report_len) ==
+         PRINTER_FRAME_REJECTED);
+
+  for (uint32_t epoch = 1; epoch <= 128U; ++epoch) {
+    for (size_t offset = 0; offset < sizeof(payload);) {
+      const size_t remaining = sizeof(payload) - offset;
+      const size_t count = remaining > 1000U ? 1000U : remaining;
+      const printer_fragment_t part = {
+          .topic = offset == 0 ? topic : NULL,
+          .topic_len = offset == 0 ? sizeof(topic) - 1U : 0U,
+          .data = payload + offset, .len = count, .offset = offset,
+          .total = sizeof(payload), .epoch = epoch,
+      };
+      const printer_frame_result_t expected =
+          count == remaining ? PRINTER_FRAME_COMPLETE : PRINTER_FRAME_PENDING;
+      assert(printer_frame_feed(&frame, &part, &report, &report_len) == expected);
+      offset += count;
+    }
+    printer_report_t parsed;
+    assert(report_len == sizeof(payload));
+    assert(printer_report_parse(report, report_len, &parsed) == ESP_OK);
+    assert(parsed.has_state && parsed.state == PRINTER_RUN_RUNNING);
+    printer_frame_clear(&frame);
+    assert(frame.bytes == NULL);
+  }
+}
+
 int main(void) {
   each_gcode_state();
   full_report_yields_only_state();
@@ -98,6 +167,8 @@ int main(void) {
   other_messages_not_found();
   malformed_reports_rejected();
   frames_reassemble();
+  complete_reports_borrow_input();
+  maximum_size_frames_reassemble_repeatedly();
   puts("printer_report: PASS");
   return 0;
 }

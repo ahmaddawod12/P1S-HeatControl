@@ -1,6 +1,7 @@
 #include "printer_report.h"
 #include <ctype.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* Streaming validation/projection: bounded recursion, no heap or token tree. */
 typedef struct {
@@ -285,6 +286,11 @@ esp_err_t printer_report_parse(const char *json, size_t len,
   *out = p.r;
   return ESP_OK;
 }
+void printer_frame_clear(printer_frame_t *f) {
+  free(f->bytes);
+  *f = (printer_frame_t){0};
+}
+
 printer_frame_result_t printer_frame_feed(printer_frame_t *f,
                                           const printer_fragment_t *p,
                                           const char **json, size_t *len) {
@@ -294,33 +300,36 @@ printer_frame_result_t printer_frame_feed(printer_frame_t *f,
   *len = 0;
   if (p->retained || !p->data || !p->len || !p->total ||
       p->total > PRINTER_REPORT_MAX || p->offset > p->total ||
-      p->len > p->total - p->offset) {
-    f->active = false;
-    return PRINTER_FRAME_REJECTED;
-  }
+      p->len > p->total - p->offset)
+    goto reject;
   if (p->offset == 0) {
     if (!p->topic || p->topic_len < 8 ||
-        memcmp(p->topic + p->topic_len - 7, "/report", 7)) {
-      f->active = false;
-      return PRINTER_FRAME_REJECTED;
+        memcmp(p->topic + p->topic_len - 7, "/report", 7))
+      goto reject;
+    printer_frame_clear(f);
+    if (p->len == p->total) {
+      *json = p->data;
+      *len = p->len;
+      return PRINTER_FRAME_COMPLETE;
     }
-    f->active = true;
-    f->used = 0;
+    f->bytes = malloc(p->total);
+    if (!f->bytes)
+      return PRINTER_FRAME_REJECTED;
     f->total = p->total;
     f->epoch = p->epoch;
   }
-  if (!f->active || p->epoch != f->epoch || p->offset != f->used ||
-      p->total != f->total) {
-    f->active = false;
-    return PRINTER_FRAME_REJECTED;
-  }
+  if (!f->bytes || p->epoch != f->epoch || p->offset != f->used ||
+      p->total != f->total)
+    goto reject;
   memcpy(f->bytes + f->used, p->data, p->len);
   f->used += p->len;
   if (f->used != f->total)
     return PRINTER_FRAME_PENDING;
-  f->bytes[f->used] = 0;
-  f->active = false;
   *json = f->bytes;
   *len = f->used;
   return PRINTER_FRAME_COMPLETE;
+
+reject:
+  printer_frame_clear(f);
+  return PRINTER_FRAME_REJECTED;
 }

@@ -38,8 +38,10 @@ static void test_identity_requires_exact_hardware_and_layout(void)
     assert(!firmware_identity_matches(&a, &b));
     b = a; b.image_flags = FIRMWARE_IMAGE_CREDENTIALS;
     assert(!firmware_identity_matches(&a, &b));
+    b = a; b.image_flags = FIRMWARE_IMAGE_FIREBASE_PILOT;
+    assert(!firmware_identity_matches(&a, &b));
     b = a;
-    strcpy(b.hardware, "other-esp32");
+    strcpy(b.hardware, "esp32-wroom-32");
     assert(!firmware_identity_matches(&a, &b));
     b = a;
     strcpy(b.layout, "another-layout");

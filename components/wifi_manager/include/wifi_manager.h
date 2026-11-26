@@ -10,7 +10,8 @@
 #define WIFI_MANAGER_SSID_LEN 33U
 #define WIFI_MANAGER_PASSWORD_LEN 64U
 #define WIFI_MANAGER_IP_LEN 16U
-#define WIFI_MANAGER_AP_SSID "P1S-Heat-Setup"
+#define WIFI_MANAGER_BOARD_ID_LEN 13U
+#define WIFI_MANAGER_AP_SSID_PREFIX "P1S-Heat-Setup"
 #define WIFI_MANAGER_AP_IP "192.168.4.1"
 
 typedef enum {
@@ -20,18 +21,27 @@ typedef enum {
     WIFI_RESULT_STORAGE_FAILED
 } wifi_result_t;
 
+typedef enum {
+    WIFI_SAVE_NONE, WIFI_SAVE_PENDING, WIFI_SAVE_SAVED, WIFI_SAVE_FAILED, WIFI_SAVE_AP_FAILED,
+} wifi_save_result_t;
+
+typedef enum {
+    WIFI_SETUP_NONE, WIFI_SETUP_NETWORK, WIFI_SETUP_PAIRING,
+} wifi_setup_mode_t;
+
 typedef struct {
     bool connected;
     char ssid[WIFI_MANAGER_SSID_LEN];
     char ip_addr[WIFI_MANAGER_IP_LEN];
     int8_t rssi;
-    char password[WIFI_MANAGER_PASSWORD_LEN];
     char controller_name[DEVICE_NAME_LEN];
-    char hostname[DEVICE_HOSTNAME_LEN], requested_name[DEVICE_NAME_LEN];
-    bool name_pending;
+    char board_id[WIFI_MANAGER_BOARD_ID_LEN];
     bool configured, ap_active, applying, can_save;
-    char ap_ssid[WIFI_MANAGER_SSID_LEN], ap_ip[WIFI_MANAGER_IP_LEN];
+    wifi_setup_mode_t setup_mode;
+    bool setup_portal_ready;
     wifi_result_t result;
+    uint32_t save_id;
+    wifi_save_result_t save_result;
 } wifi_manager_status_t;
 
 typedef device_wifi_credentials_t wifi_credentials_t;
@@ -60,5 +70,19 @@ uint32_t wifi_manager_backoff_ms(size_t attempt);
  * once; generic updates never replace a saved record. */
 esp_err_t wifi_manager_start(void);
 void wifi_manager_get_status(wifi_manager_status_t *out_status);
-esp_err_t wifi_manager_request_credentials(const wifi_credentials_t *credentials);
+/* Returns the station connection generation when the link is available.
+ * Disconnect events and accepted credential changes invalidate older generations. */
+bool wifi_manager_connection_generation(uint32_t *generation);
+/* Serialize a short relay commit with disconnect reporting and credential changes.
+ * Release the connection lock after a successful call. */
+bool wifi_manager_lock_connection(uint32_t *generation);
+void wifi_manager_unlock_connection(void);
+/* Enter credentials during Wi-Fi setup and return the save receipt ID. */
+esp_err_t wifi_manager_request_credentials(const wifi_credentials_t *credentials, uint32_t *save_id);
 const char *wifi_manager_result_name(wifi_result_t result);
+
+/* The Wi-Fi worker owns the hotspot and calls these hooks while it is active. */
+typedef esp_err_t (*wifi_setup_portal_fn)(void);
+void wifi_manager_set_setup_portal(wifi_setup_portal_fn start, wifi_setup_portal_fn stop);
+/* A confirmed enrollment stays paired during temporary Firebase failures. */
+void wifi_manager_set_paired(bool paired);

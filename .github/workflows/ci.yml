@@ -1,0 +1,109 @@
+name: Firmware CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Match the cJSON version used by the ESP-IDF managed component.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3 # v1.7.19
+          path: managed_components/espressif__cjson/cJSON
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Host tests
+        shell: msys2 {0}
+        run: |
+          cmake -S test_apps/host -B test_apps/host/build -G Ninja
+          cmake --build test_apps/host/build --parallel 2
+          ctest --test-dir test_apps/host/build --output-on-failure
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Setup page tests
+        run: node --test test_apps/web/*.cjs
+      - name: Local publisher safeguards
+        shell: pwsh
+        run: ./test_apps/tools/test_publish_firmware.ps1
+
+  firmware-builds:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      IDF_IMAGE: espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build firmware and run tool checks
+        run: |
+          mkdir -p build-ci-firebase
+          cat > build-ci-firebase/sdkconfig <<'EOF'
+          CONFIG_P1S_FIREBASE_ENABLED=y
+          CONFIG_P1S_FIREBASE_DATABASE_URL="https://demo-p1s-heat-default-rtdb.firebaseio.com"
+          CONFIG_P1S_FIREBASE_API_KEY="test-key"
+          CONFIG_P1S_FIREBASE_PAIRING_URL="https://example.invalid/api/pairing"
+          CONFIG_P1S_FIREBASE_SETUP_PASSPHRASE="test-only"
+          EOF
+          docker run --rm --volume "$PWD:/project" --workdir /project "$IDF_IMAGE" bash -euc '
+            git config --global --add safe.directory /project
+            idf.py -B build-ci-default -D SDKCONFIG=build-ci-default/sdkconfig build
+            idf.py -B build-ci-firebase -D SDKCONFIG=build-ci-firebase/sdkconfig build
+            idf.py -C test_apps/unit -B build-ci build
+            python -m unittest discover -s test_apps/tools -v
+          '
+
+  cloud-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            cloud/package-lock.json
+            cloud/functions/package-lock.json
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install test dependencies
+        run: |
+          npm ci
+          npm ci --prefix functions
+          npm install --global firebase-tools@15.32.1
+          npx --no-install playwright install --with-deps chromium
+      - name: Firebase domain and emulator tests
+        run: npm test
+      - name: Hosted dashboard browser tests
+        run: npm run test:browser

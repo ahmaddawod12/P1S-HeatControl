@@ -1,5 +1,4 @@
-# Native monitoring also uses the MQTT-task dispatcher for pushall. This is
-# required independently of the automatic Resume qualification option.
+# Enable MQTT event queue settings for the native printer subscription.
 config P1S_PRINTER_LINK_NATIVE
     bool
     default y

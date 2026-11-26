@@ -7,7 +7,9 @@ static bool sample_has_overtemperature(const heat_controller_t *controller,
                                        const temperature_sample_t *sample)
 {
     return sample != NULL &&
-           ((isfinite(sample->raw_c) &&
+           ((isfinite(sample->probe_c) &&
+             sample->probe_c >= controller->config.overtemp_c) ||
+            (isfinite(sample->raw_c) &&
              sample->raw_c >= controller->config.overtemp_c) ||
             (isfinite(sample->filtered_c) &&
              sample->filtered_c >= controller->config.overtemp_c));
@@ -17,7 +19,7 @@ static bool sample_is_healthy(const temperature_sample_t *sample)
 {
     return sample != NULL && sample->valid &&
            sample->fault == HEAT_FAULT_NONE &&
-           isfinite(sample->raw_c) && isfinite(sample->filtered_c);
+           isfinite(sample->probe_c) && isfinite(sample->raw_c) && isfinite(sample->filtered_c);
 }
 
 static bool sample_is_retrying(const temperature_sample_t *sample)
@@ -32,33 +34,29 @@ static bool sample_is_retrying(const temperature_sample_t *sample)
            sample->fault == HEAT_FAULT_SENSOR_INVALID;
 }
 
-static void record_output(heat_controller_t *controller,
-                          bool output_on,
-                          uint64_t now_ms)
+static void force_idle(heat_controller_t *controller)
 {
-    if (controller->snapshot.output_on == output_on) {
-        return;
-    }
-    controller->snapshot.output_on = output_on;
-    controller->last_transition_ms = now_ms;
-    controller->has_transition = true;
-}
-
-static void force_idle(heat_controller_t *controller, uint64_t now_ms)
-{
-    record_output(controller, false, now_ms);
+    controller->snapshot.output_on = false;
+    controller->manual_start_pending = false;
     controller->snapshot.enabled = false;
     controller->snapshot.state = controller->snapshot.fault == HEAT_FAULT_NONE
         ? HEAT_STATE_IDLE : HEAT_STATE_FAULT;
 }
 
-static void latch_fault(heat_controller_t *controller,
-                        heat_fault_t fault,
-                        uint64_t now_ms)
+static void hold_output(heat_controller_t *controller)
 {
-    record_output(controller, false, now_ms);
-    controller->snapshot.enabled = false;
-    controller->snapshot.state = HEAT_STATE_FAULT;
+    controller->snapshot.output_on = false;
+    controller->manual_start_pending = false;
+    controller->snapshot.state = HEAT_STATE_HOLDING;
+}
+
+static void latch_fault(heat_controller_t *controller, heat_fault_t fault)
+{
+    /* A startup storage fault can change the reported fault while the
+     * controller still needs to acknowledge an interrupted heating session. */
+    if (fault == HEAT_FAULT_RESTART_LOCKOUT) {
+        controller->snapshot.restart_lockout = true;
+    }
     /* Relay initialization failures require a restart. Later recoverable
      * faults must not replace them and make acknowledgement possible. */
     if (controller->snapshot.fault != HEAT_FAULT_OUTPUT_INIT) {
@@ -66,14 +64,14 @@ static void latch_fault(heat_controller_t *controller,
             ? HEAT_FAULT_SENSOR_INVALID
             : fault;
     }
+    force_idle(controller);
 }
 
-static bool transition_allowed(const heat_controller_t *controller,
-                               uint64_t now_ms)
+static bool off_interval_elapsed(const heat_controller_t *controller, uint64_t now_ms)
 {
-    return !controller->has_transition ||
-           (now_ms - controller->last_transition_ms) >=
-               controller->config.min_transition_ms;
+    return !controller->relay_off_recorded ||
+           (now_ms >= controller->relay_off_at_ms &&
+            now_ms - controller->relay_off_at_ms >= controller->config.min_transition_ms);
 }
 
 bool heat_target_is_valid(float target_c)
@@ -85,6 +83,17 @@ bool heat_target_is_valid(float target_c)
     return fabsf(doubled - roundf(doubled)) <= 0.001f;
 }
 
+bool heat_hysteresis_is_valid(float hysteresis_c)
+{
+    return hysteresis_c >= HEAT_MIN_HYSTERESIS_C && hysteresis_c <= HEAT_MAX_HYSTERESIS_C &&
+           hysteresis_c * 2.0f == roundf(hysteresis_c * 2.0f);
+}
+
+bool heat_restart_is_valid(float target_c, float restart_c)
+{
+    return target_c > 0.0f && heat_hysteresis_is_valid(target_c - restart_c);
+}
+
 void heat_controller_init(heat_controller_t *controller,
                           const heat_controller_config_t *config)
 {
@@ -93,6 +102,9 @@ void heat_controller_init(heat_controller_t *controller,
     }
     memset(controller, 0, sizeof(*controller));
     controller->config = *config;
+    if (!heat_hysteresis_is_valid(controller->config.hysteresis_c)) {
+        controller->config.hysteresis_c = HEAT_DEFAULT_HYSTERESIS_C;
+    }
     controller->snapshot = (heat_controller_snapshot_t) {
         .state = HEAT_STATE_BOOT,
         .fault = HEAT_FAULT_NONE,
@@ -102,6 +114,15 @@ void heat_controller_init(heat_controller_t *controller,
             ? config->target_c
             : 60.0f,
     };
+}
+
+void heat_controller_note_relay_off(heat_controller_t *controller, uint64_t now_ms)
+{
+    if (controller == NULL) {
+        return;
+    }
+    controller->relay_off_at_ms = now_ms;
+    controller->relay_off_recorded = true;
 }
 
 void heat_controller_step(heat_controller_t *controller,
@@ -114,7 +135,7 @@ void heat_controller_step(heat_controller_t *controller,
     }
 
     if (sample_has_overtemperature(controller, sample)) {
-        latch_fault(controller, HEAT_FAULT_OVERTEMP, now_ms);
+        latch_fault(controller, HEAT_FAULT_OVERTEMP);
         return;
     }
     if (!sample_is_healthy(sample)) {
@@ -123,52 +144,55 @@ void heat_controller_step(heat_controller_t *controller,
         if (sample_is_retrying(sample)) {
             return;
         }
-        latch_fault(controller, sample->fault, now_ms);
+        latch_fault(controller, sample->fault);
         return;
     }
     if (!controller->snapshot.enabled) {
         return;
     }
     if (controller->snapshot.target_c <= 0.0f) {
-        force_idle(controller, now_ms);
+        force_idle(controller);
         return;
     }
-    if (controller->snapshot.inhibited) {
-        record_output(controller, false, now_ms);
-        controller->snapshot.state = HEAT_STATE_HOLDING;
-        return;
-    }
-
-    if (sample->filtered_c >= controller->snapshot.target_c) {
-        record_output(controller, false, now_ms);
-        controller->snapshot.state = HEAT_STATE_HOLDING;
+    if (controller->snapshot.inhibited ||
+        sample->filtered_c >= controller->snapshot.target_c) {
+        hold_output(controller);
         return;
     }
 
     if (!controller->snapshot.output_on &&
         sample->consecutive_valid >= 3U &&
-        sample->filtered_c <=
-            (controller->snapshot.target_c -
-             controller->config.hysteresis_c)) {
-        if (transition_allowed(controller, now_ms)) {
-            record_output(controller, true, now_ms);
-            controller->snapshot.state = HEAT_STATE_HEATING;
-        }
+        (controller->manual_start_pending ||
+         sample->filtered_c <= controller->snapshot.target_c - controller->config.hysteresis_c) &&
+        off_interval_elapsed(controller, now_ms)) {
+        controller->snapshot.output_on = true;
+        controller->manual_start_pending = false;
+        controller->snapshot.state = HEAT_STATE_HEATING;
     }
+}
+
+static bool sample_is_cool(const temperature_sample_t *sample)
+{
+    return sample_is_healthy(sample) &&
+           sample->probe_c < 80.0f && sample->raw_c < 80.0f && sample->filtered_c < 80.0f;
 }
 
 static bool fault_can_be_acknowledged(
     const heat_controller_t *controller,
     const temperature_sample_t *sample)
 {
+    if (controller->snapshot.restart_lockout &&
+        (!sample_is_cool(sample) || sample->consecutive_valid < 3U)) {
+        return false;
+    }
     switch (controller->snapshot.fault) {
     case HEAT_FAULT_NVS:
+    case HEAT_FAULT_RESTART_LOCKOUT:
         return true;
     case HEAT_FAULT_OUTPUT_INIT:
         return false;
     case HEAT_FAULT_OVERTEMP:
-        return sample_is_healthy(sample) &&
-               sample->raw_c < 80.0f && sample->filtered_c < 80.0f;
+        return sample_is_cool(sample);
     case HEAT_FAULT_SENSOR_OPEN:
     case HEAT_FAULT_SENSOR_SHORT:
     case HEAT_FAULT_SENSOR_RANGE:
@@ -200,25 +224,20 @@ bool heat_controller_command(heat_controller_t *controller,
             return false;
         }
         if (sample_has_overtemperature(controller, sample)) {
-            latch_fault(controller, HEAT_FAULT_OVERTEMP, now_ms);
+            latch_fault(controller, HEAT_FAULT_OVERTEMP);
             return false;
         }
         if (controller->snapshot.enabled) {
             return true;
         }
         controller->snapshot.enabled = true;
-        if (controller->snapshot.inhibited ||
-            sample->filtered_c >= controller->snapshot.target_c) {
-            record_output(controller, false, now_ms);
-            controller->snapshot.state = HEAT_STATE_HOLDING;
-        } else {
-            record_output(controller, true, now_ms);
-            controller->snapshot.state = HEAT_STATE_HEATING;
-        }
+        controller->snapshot.state = HEAT_STATE_HOLDING;
+        controller->manual_start_pending = true;
+        heat_controller_step(controller, sample, now_ms);
         return true;
 
     case HEAT_COMMAND_DISABLE:
-        force_idle(controller, now_ms);
+        force_idle(controller);
         return true;
 
     case HEAT_COMMAND_SET_TARGET:
@@ -228,10 +247,17 @@ bool heat_controller_command(heat_controller_t *controller,
         controller->snapshot.target_c = command->target_c;
         controller->config.target_c = command->target_c;
         if (command->target_c == 0.0f) {
-            force_idle(controller, now_ms);
+            force_idle(controller);
         } else if (controller->snapshot.enabled && sample != NULL) {
             heat_controller_step(controller, sample, now_ms);
         }
+        return true;
+
+    case HEAT_COMMAND_SET_RESTART:
+        if (!heat_restart_is_valid(controller->snapshot.target_c, command->restart_c)) {
+            return false;
+        }
+        controller->config.hysteresis_c = controller->snapshot.target_c - command->restart_c;
         return true;
 
     case HEAT_COMMAND_ACK_FAULT:
@@ -240,15 +266,17 @@ bool heat_controller_command(heat_controller_t *controller,
             return false;
         }
         controller->snapshot.fault = HEAT_FAULT_NONE;
-        force_idle(controller, now_ms);
+        controller->snapshot.restart_lockout = false;
+        force_idle(controller);
         return true;
 
     case HEAT_COMMAND_LATCH_EXTERNAL_FAULT:
         if (command->fault != HEAT_FAULT_NVS &&
-            command->fault != HEAT_FAULT_OUTPUT_INIT) {
+            command->fault != HEAT_FAULT_OUTPUT_INIT &&
+            command->fault != HEAT_FAULT_RESTART_LOCKOUT) {
             return false;
         }
-        latch_fault(controller, command->fault, now_ms);
+        latch_fault(controller, command->fault);
         return true;
 
     default:
@@ -256,17 +284,14 @@ bool heat_controller_command(heat_controller_t *controller,
     }
 }
 
-void heat_controller_set_inhibit(heat_controller_t *controller,
-                                 bool inhibited,
-                                 uint64_t now_ms)
+void heat_controller_set_inhibit(heat_controller_t *controller, bool inhibited)
 {
     if (controller == NULL) {
         return;
     }
     controller->snapshot.inhibited = inhibited;
     if (inhibited && controller->snapshot.enabled) {
-        record_output(controller, false, now_ms);
-        controller->snapshot.state = HEAT_STATE_HOLDING;
+        hold_output(controller);
     }
 }
 
@@ -279,5 +304,7 @@ heat_controller_snapshot_t heat_controller_snapshot(
             .fault = HEAT_FAULT_SENSOR_INVALID,
         };
     }
-    return controller->snapshot;
+    heat_controller_snapshot_t snapshot = controller->snapshot;
+    snapshot.restart_c = snapshot.target_c - controller->config.hysteresis_c;
+    return snapshot;
 }

@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "app_types.h"
 #include "esp_err.h"
 
 /* Schema 2 calibrates the DS18B20; schema 1 offsets belong to the NTC. */
@@ -25,10 +26,12 @@ typedef struct {
 } settings_data_t;
 
 esp_err_t settings_init(void);
-esp_err_t settings_load_heating_enabled(bool *enabled);
-esp_err_t settings_save_heating_enabled(bool enabled);
+esp_err_t settings_load_heat_mode(heat_mode_t *mode);
+esp_err_t settings_save_heat_mode(heat_mode_t mode);
 void settings_factory_defaults(settings_data_t *data);
 esp_err_t settings_load(settings_data_t *data,
                         settings_load_result_t *out_result);
 esp_err_t settings_set_target(float target_c);
 esp_err_t settings_set_calibration(float calibration_offset_c);
+esp_err_t settings_load_hysteresis(float *hysteresis_c);
+esp_err_t settings_set_hysteresis(float hysteresis_c);

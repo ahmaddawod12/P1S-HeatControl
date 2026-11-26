@@ -55,7 +55,7 @@ void temperature_monitor_init(temperature_monitor_t *monitor,
     monitor->calibration_offset_c = isfinite(calibration_offset_c)
         ? calibration_offset_c
         : 0.0f;
-    monitor->last_raw_c = NAN;
+    monitor->last_probe_c = NAN;
     monitor->fault = HEAT_FAULT_SENSOR_INVALID;
 }
 
@@ -69,7 +69,6 @@ bool temperature_monitor_set_calibration(temperature_monitor_t *monitor,
     for (size_t i = 0U; i < monitor->count; ++i) {
         monitor->window[i] += delta;
     }
-    monitor->last_raw_c += delta;
     monitor->calibration_offset_c = calibration_offset_c;
     return true;
 }
@@ -106,12 +105,12 @@ void temperature_monitor_push(temperature_monitor_t *monitor,
         monitor->consecutive_valid = 0U;
         monitor->count = 0U;
         monitor->next = 0U;
-        monitor->last_raw_c = NAN;
+        monitor->last_probe_c = NAN;
         return;
     }
 
     monitor->consecutive_failures = 0U;
-    monitor->last_raw_c = calibrated;
+    monitor->last_probe_c = raw_temperature_c;
     monitor->window[monitor->next] = calibrated;
     monitor->next =
         (monitor->next + 1U) % TEMPERATURE_MONITOR_WINDOW_SIZE;
@@ -128,6 +127,7 @@ temperature_sample_t temperature_monitor_snapshot(
     uint64_t now_ms)
 {
     temperature_sample_t sample = {
+        .probe_c = NAN,
         .raw_c = NAN,
         .filtered_c = NAN,
         .valid = false,
@@ -139,7 +139,8 @@ temperature_sample_t temperature_monitor_snapshot(
         return sample;
     }
 
-    sample.raw_c = monitor->last_raw_c;
+    sample.probe_c = monitor->last_probe_c;
+    sample.raw_c = sample.probe_c + monitor->calibration_offset_c;
     sample.filtered_c = median(monitor);
     sample.consecutive_valid = monitor->consecutive_valid;
     sample.consecutive_failures = monitor->consecutive_failures;

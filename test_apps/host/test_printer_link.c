@@ -1,8 +1,8 @@
 /* Printer link + native transport with synthetic ESP-MQTT/netif boundaries.
- * The link only reads gcode_state and only ever publishes pushall. */
+ * The link subscribes to reports and only reads gcode_state. */
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "freertos/task.h"
+#include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "printer_link.h"
 #include "printer_monitor.h"
@@ -19,23 +19,14 @@ static esp_event_handler_t ip_handler;
 static void *ip_arg;
 static int32_t ip_event_id;
 static esp_mqtt_client_config_t recorded;
-static unsigned pushalls, aborted, inits;
-static bool pending_dispatch;
+static unsigned aborted, inits;
 static struct esp_mqtt_client client;
-static esp_mqtt_event_t pending_event;
-esp_err_t esp_mqtt_dispatch_custom_event(esp_mqtt_client_handle_t c,
-                                         esp_mqtt_event_t *event) {
-  assert(c == &client);
-  pending_event = *event;
-  pending_dispatch = true;
+static enum { SUBSCRIBE_ACCEPT, SUBSCRIBE_SILENT, SUBSCRIBE_REJECT } subscription_reply;
+static uint8_t station_mac[] = {0x02, 0x16, 0x3e, 0x10, 0x20, 0x30};
+esp_err_t esp_wifi_get_mac(int interface, uint8_t mac[6]) {
+  assert(interface == WIFI_IF_STA);
+  memcpy(mac, station_mac, sizeof(station_mac));
   return ESP_OK;
-}
-void vTaskDelay(TickType_t ticks) {
-  now += (uint64_t)ticks * 4;
-  if (pending_dispatch) {
-    pending_dispatch = false;
-    mqtt_handler(mqtt_arg, "MQTT", MQTT_USER_EVENT, &pending_event);
-  }
 }
 const char printer_bambu_ca[] =
     "-----BEGIN CERTIFICATE-----\ntest CA\n-----END CERTIFICATE-----\n";
@@ -55,8 +46,6 @@ esp_err_t esp_mqtt_client_register_event(esp_mqtt_client_handle_t c, int32_t id,
 }
 esp_err_t esp_mqtt_client_start(esp_mqtt_client_handle_t c) {
   assert(c == &client);
-  assert(esp_transport_connect(recorded.network.transport, "192.168.1.20", 8883,
-                               10000) == 0);
   return ESP_OK;
 }
 esp_err_t esp_mqtt_client_stop(esp_mqtt_client_handle_t c) {
@@ -66,27 +55,31 @@ esp_err_t esp_mqtt_client_stop(esp_mqtt_client_handle_t c) {
 }
 esp_err_t esp_mqtt_client_destroy(esp_mqtt_client_handle_t c) {
   assert(c == &client);
-  pending_dispatch = false;
-  esp_transport_destroy(recorded.network.transport);
   return ESP_OK;
 }
 int esp_mqtt_client_subscribe(esp_mqtt_client_handle_t c, const char *topic,
                               int qos) {
   assert(c == &client && !strcmp(topic, "device/SERIAL123/report") && qos == 0);
-  esp_mqtt_event_t event = {.client = c, .msg_id = 17};
-  mqtt_handler(mqtt_arg, "MQTT", MQTT_EVENT_SUBSCRIBED, &event);
+  if (subscription_reply != SUBSCRIBE_SILENT) {
+    esp_mqtt_error_codes_t result = {
+        .error_type = subscription_reply == SUBSCRIBE_REJECT
+            ? MQTT_ERROR_TYPE_SUBSCRIBE_FAILED : MQTT_ERROR_TYPE_NONE,
+    };
+    esp_mqtt_event_t event = {.client = c, .msg_id = 17, .error_handle = &result};
+    mqtt_handler(mqtt_arg, "MQTT", MQTT_EVENT_SUBSCRIBED, &event);
+  }
   return 17;
 }
 int esp_mqtt_client_publish(esp_mqtt_client_handle_t c, const char *topic,
                             const char *data, int len, int qos, int retain) {
-  assert(c == &client && !strcmp(topic, "device/SERIAL123/request"));
-  assert(qos == 0 && !retain && len > 0);
-  /* The only message this firmware ever sends to the printer. */
-  assert(strstr(data, "\"pushing\"") && strstr(data, "\"pushall\""));
-  ++pushalls;
-  assert(esp_transport_write(recorded.network.transport, data, len, 10000) ==
-         len);
-  return 0;
+  (void)c;
+  (void)topic;
+  (void)data;
+  (void)len;
+  (void)qos;
+  (void)retain;
+  assert(!"the printer link must only subscribe");
+  return -1;
 }
 esp_err_t
 esp_event_handler_instance_register(esp_event_base_t b, int32_t id,
@@ -148,10 +141,9 @@ static void report_state(const char *state) {
            "{\"print\":{\"command\":\"push_status\",\"gcode_state\":\"%s\"}}", state);
   event(MQTT_EVENT_DATA, json);
 }
-/* Fresh link connected at t=0 with one pushall already sent. */
-static void start_connected(void) {
+static void start_link(void) {
   now = 0;
-  pushalls = aborted = inits = 0;
+  aborted = inits = 0;
   assert(printer_link_start() == ESP_OK);
   const printer_connection_config_t config = {.enabled = true,
                                              .ipv4 = "192.168.1.20",
@@ -159,6 +151,10 @@ static void start_connected(void) {
                                              .access_code = "Secret"};
   assert(printer_link_configure(&config) == ESP_OK);
   printer_link_tick(now);
+}
+/* Fresh link subscribed at t=0, before the first report. */
+static void start_connected(void) {
+  start_link();
   connect_events();
 }
 /* Disconnect, then let the 1 s retry delay elapse so the link reconnects at t. */
@@ -169,18 +165,20 @@ static void reconnect_at(uint64_t t) {
   connect_events();
 }
 
-static void first_connect_sends_one_pushall(void) {
+static void first_connect_subscribes_and_waits_for_state(void) {
   start_connected();
   assert(recorded.broker.address.port == 8883);
   assert(recorded.broker.address.transport == MQTT_TRANSPORT_OVER_SSL);
   assert(!strcmp(recorded.broker.address.hostname, "192.168.1.20"));
   assert(!strcmp(recorded.credentials.username, "bblp"));
+  assert(strlen(recorded.credentials.client_id) == 23);
+  assert(!strncmp(recorded.credentials.client_id, "p1s02163e102030", 15));
   assert(!strcmp(recorded.credentials.authentication.password, "Secret"));
   assert(recorded.broker.verification.certificate == printer_bambu_ca);
   assert(!recorded.broker.verification.skip_cert_common_name_check);
   assert(!strcmp(recorded.broker.verification.common_name, "SERIAL123"));
   assert(recorded.network.disable_auto_reconnect);
-  assert(pushalls == 1);
+  assert(recorded.network.timeout_ms == 10000);
   printer_link_status_t s = status();
   assert(s.connected && !s.state_known && s.reconnects == 0);
   report_state("PAUSE");
@@ -188,7 +186,63 @@ static void first_connect_sends_one_pushall(void) {
   s = status();
   assert(s.state_known && s.state == PRINTER_RUN_PAUSED && s.received_ms == now);
 }
-static void known_state_no_periodic_pushall(void) {
+static void connect_timeout_retries(void) {
+  start_link();
+  tick_at(29999);
+  assert(inits == 1 && aborted == 0 && !status().connected);
+  tick_at(30000);
+  tick_at(30001);
+  assert(inits == 1 && aborted == 1 && !status().connected);
+  tick_at(31001);
+  assert(inits == 2);
+  connect_events();
+}
+static void subscribe_timeout_retries(void) {
+  subscription_reply = SUBSCRIBE_SILENT;
+  start_link();
+  event(MQTT_EVENT_CONNECTED, NULL);
+  tick_at(2000);
+  tick_at(16999);
+  assert(inits == 1 && aborted == 0 && !status().connected);
+  tick_at(17000);
+  tick_at(17001);
+  assert(inits == 1 && aborted == 1 && !status().connected);
+  tick_at(18001);
+  assert(inits == 2);
+  subscription_reply = SUBSCRIBE_ACCEPT;
+  connect_events();
+}
+static void rejected_subscription_retries_with_backoff(void) {
+  subscription_reply = SUBSCRIBE_REJECT;
+  start_link();
+  event(MQTT_EVENT_CONNECTED, NULL);
+  tick_at(0);
+  assert(!status().connected);
+  tick_at(1);
+  assert(aborted == 1 && inits == 1);
+  tick_at(1001);
+  assert(inits == 2);
+  event(MQTT_EVENT_CONNECTED, NULL);
+  tick_at(1001);
+  tick_at(1002);
+  assert(aborted == 2 && !status().connected);
+  tick_at(2002);
+  assert(inits == 2);
+  tick_at(3002);
+  assert(inits == 3);
+  subscription_reply = SUBSCRIBE_ACCEPT;
+  connect_events();
+}
+static void client_id_uses_the_controller_address(void) {
+  start_connected();
+  char first_id[24];
+  memcpy(first_id, recorded.credentials.client_id, sizeof(first_id));
+  station_mac[5] = 0x31;
+  reconnect_at(11000);
+  assert(strncmp(first_id, recorded.credentials.client_id, 15) != 0);
+  assert(!strncmp(recorded.credentials.client_id, "p1s02163e102031", 15));
+}
+static void known_state_keeps_receiving_deltas(void) {
   start_connected();
   report_state("RUNNING");
   for (uint64_t t = 1000; t <= 600000; t += 1000) {
@@ -196,23 +250,34 @@ static void known_state_no_periodic_pushall(void) {
     if (t % 20000 == 0)
       event(MQTT_EVENT_DATA, "{\"print\":{\"command\":\"push_status\",\"mc_percent\":5}}");
   }
-  assert(pushalls == 1 && aborted == 0);
+  assert(status().state_known && status().state == PRINTER_RUN_RUNNING);
+  assert(aborted == 0);
 }
-static void reconnect_waits_for_pushall_interval(void) {
+static void reconnect_waits_for_print_state(void) {
   start_connected();
   report_state("RUNNING");
   printer_link_tick(now);
+  printer_monitor_status_t monitor;
+  printer_monitor_init(&monitor);
+  printer_link_status_t link = status();
+  assert(printer_monitor_start(&monitor, &link, now));
   reconnect_at(60000);
-  assert(!status().state_known && pushalls == 1);
-  tick_at(299999);
-  assert(pushalls == 1);
-  tick_at(300000);
-  assert(pushalls == 2);
-  tick_at(300500);
-  assert(pushalls == 2);
+  now = 300000;
+  event(MQTT_EVENT_DATA, "{\"print\":{\"command\":\"push_status\",\"mc_percent\":5}}");
+  tick_at(now);
+  link = status();
+  assert(link.connected && !link.state_known && link.received_ms == now);
+  printer_monitor_step(&monitor, &link, now);
+  assert(monitor.hold == PRINTER_HOLD_UNKNOWN);
+  assert(!printer_monitor_heat_allowed(&monitor));
+
+  now = 300500;
   report_state("RUNNING");
-  tick_at(900000);
-  assert(pushalls == 2 && status().state == PRINTER_RUN_RUNNING);
+  tick_at(now);
+  link = status();
+  assert(link.state_known && link.state == PRINTER_RUN_RUNNING);
+  printer_monitor_step(&monitor, &link, now);
+  assert(printer_monitor_heat_allowed(&monitor));
 }
 static void report_without_state_updates_received(void) {
   start_connected();
@@ -232,10 +297,8 @@ static void malformed_report_marks_unknown_without_reconnect(void) {
   tick_at(2000);
   printer_link_status_t s = status();
   assert(!s.state_known && s.connected && aborted == 0 && inits == 1);
-  tick_at(299999);
-  assert(pushalls == 1);
   tick_at(300000);
-  assert(pushalls == 2 && aborted == 0);
+  assert(!status().state_known && aborted == 0);
   report_state("RUNNING");
   tick_at(300100);
   assert(status().state_known);
@@ -383,23 +446,17 @@ static void prior_completion_does_not_end_new_monitor(void) {
   assert(monitor.phase == PRINTER_MONITOR_OFF);
   assert(monitor.last_end == PRINTER_MONITOR_END_FAILED);
 }
-static void unrecognized_state_keeps_recovery_enabled(void) {
+static void unrecognized_state_waits_for_known_report(void) {
   start_connected();
   report_state("UNKNOWN");
   tick_at(1000);
   assert(status().connected && status().state == PRINTER_RUN_UNKNOWN);
   assert(!status().state_known);
-  tick_at(299999);
-  assert(pushalls == 1);
   tick_at(300000);
-  assert(pushalls == 2 && inits == 1 && aborted == 0);
-  tick_at(300001);
-  assert(pushalls == 2);
+  assert(!status().state_known && inits == 1 && aborted == 0);
   report_state("RUNNING");
   tick_at(300100);
   assert(status().state_known && status().state == PRINTER_RUN_RUNNING);
-  tick_at(900000);
-  assert(pushalls == 2);
 }
 static void pending_completion_before_start_is_historical(void) {
   start_connected();
@@ -459,11 +516,19 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "network_lost_ip"))
       network_event(IP_EVENT_STA_LOST_IP);
     else if (!strcmp(argv[1], "first_connect"))
-      first_connect_sends_one_pushall();
+      first_connect_subscribes_and_waits_for_state();
+    else if (!strcmp(argv[1], "connect_timeout"))
+      connect_timeout_retries();
+    else if (!strcmp(argv[1], "subscribe_timeout"))
+      subscribe_timeout_retries();
+    else if (!strcmp(argv[1], "subscribe_rejected"))
+      rejected_subscription_retries_with_backoff();
+    else if (!strcmp(argv[1], "client_id"))
+      client_id_uses_the_controller_address();
     else if (!strcmp(argv[1], "known_state"))
-      known_state_no_periodic_pushall();
-    else if (!strcmp(argv[1], "reconnect_interval"))
-      reconnect_waits_for_pushall_interval();
+      known_state_keeps_receiving_deltas();
+    else if (!strcmp(argv[1], "reconnect_waits_for_report"))
+      reconnect_waits_for_print_state();
     else if (!strcmp(argv[1], "report_without_state"))
       report_without_state_updates_received();
     else if (!strcmp(argv[1], "malformed"))
@@ -484,7 +549,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "pending_completion"))
       pending_completion_before_start_is_historical();
     else if (!strcmp(argv[1], "unknown_recovery"))
-      unrecognized_state_keeps_recovery_enabled();
+      unrecognized_state_waits_for_known_report();
     else if (!strcmp(argv[1], "reconnect_counter"))
       reconnect_counter();
     else if (!strcmp(argv[1], "disconnect"))

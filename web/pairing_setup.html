@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair controller</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  main { max-width: 28rem; margin: 2rem auto; padding: 0 1rem; }
+  output { font: bold 1.4rem ui-monospace, monospace; user-select: all; }
+</style>
+<main>
+  <h1>Pair controller</h1>
+  <p id="board-id" hidden></p>
+  <p id="pairing-instructions">Copy the code, then return to a network with internet access and enter it on the dashboard.</p>
+  <output id="code" aria-label="Pairing code">Getting pairing code…</output>
+  <p><a href="/wifi">Change Wi-Fi network</a></p>
+</main>
+<script>
+  const code = document.getElementById('code');
+  const instructions = document.getElementById('pairing-instructions');
+  const boardLabel = document.getElementById('board-id');
+  let boardId;
+  async function refresh() {
+    try {
+      const response = await fetch('/api/pairing', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (response.status === 404) {
+        location.replace('/');
+        return;
+      }
+      if (!response.ok && response.status !== 409) throw new Error('Pairing unavailable');
+      const id = response.headers.get('X-P1S-Board-ID');
+      if (!id || (boardId && id !== boardId)) {
+        code.textContent = 'The connected controller changed. Reload this page to continue.';
+        instructions.hidden = true;
+      } else {
+        boardId = id;
+        boardLabel.textContent = 'Board ' + boardId;
+        boardLabel.hidden = false;
+        code.textContent = (await response.text()) || 'Getting pairing code…';
+        instructions.hidden = response.status === 409;
+      }
+    } catch {
+      code.textContent = 'Pairing setup is unreachable.';
+      instructions.hidden = true;
+    }
+    setTimeout(refresh, 1500);
+  }
+  refresh();
+</script>

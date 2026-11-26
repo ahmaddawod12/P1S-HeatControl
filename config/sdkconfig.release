@@ -1,0 +1,7 @@
+# Firebase web client settings for public signed firmware.
+# Wi-Fi and setup credentials are stored on each controller.
+CONFIG_P1S_FIREBASE_ENABLED=y
+CONFIG_P1S_FIREBASE_PUBLIC_RELEASE=y
+CONFIG_P1S_FIREBASE_DATABASE_URL="https://p1s-heat-control-pilot-default-rtdb.firebaseio.com"
+CONFIG_P1S_FIREBASE_API_KEY="AIzaSyB_wtEAWYieQ1YoCAwhyWc6zZdOS0u-n7w"
+CONFIG_P1S_FIREBASE_PAIRING_URL="https://p1s-heat-control-pilot.web.app/api/pairing"

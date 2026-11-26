@@ -2,24 +2,18 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
-#include "esp_transport_ssl.h"
 #include "esp_wifi.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "sdkconfig.h"
-#if !defined(CONFIG_MQTT_EVENT_QUEUE_SIZE) || CONFIG_MQTT_EVENT_QUEUE_SIZE < 2
-#error                                                                         \
-    "Printer dispatcher requires MQTT custom configuration with at least two event slots"
+#if defined(CONFIG_MBEDTLS_HAVE_TIME_DATE) && defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+#include "clock_service.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509_crt.h"
+#define PRINTER_LAN_TLS_WITHOUT_CLOCK 1
 #endif
-#if defined(CONFIG_MQTT_DISABLE_API_LOCKS) && CONFIG_MQTT_DISABLE_API_LOCKS
-#error "Printer dispatcher requires MQTT API locks"
-#endif
-#include "printer_deadline_transport.h"
 #include "printer_report.h"
 #include <stdatomic.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 /* Trust bundle from OpenBambuAPI/examples/ca_cert.pem (retrieved 2026-11-01).
  * Includes Bambu's old and 2025 RSA/ECC CA generations. Never bypass peer
@@ -31,36 +25,44 @@ extern const char printer_bambu_ca[] asm("_binary_bambu_ca_pem_start");
 #endif
 typedef struct {
   esp_mqtt_client_handle_t client;
-  printer_frame_t *frame;
+  printer_frame_t frame;
   printer_connection_config_t config;
   atomic_uint epoch;
   atomic_int subscription, last_ack;
   atomic_bool subscription_notified;
-  char report_topic[64], client_id[48];
+  char report_topic[64], client_id[24];
+#ifdef PRINTER_LAN_TLS_WITHOUT_CLOCK
+  mbedtls_x509_crt lan_ca;
+#endif
   esp_event_handler_instance_t wifi_event, ip_event;
-  esp_transport_handle_t wire;
-  atomic_int send_state;
-  int send_id;
-  uint64_t send_deadline;
-  char send_topic[64], send_json[128];
-  size_t send_len;
-  esp_err_t send_result;
 } native_t;
 static native_t s;
-static uint64_t now_ms(void *ctx) {
+#ifdef PRINTER_LAN_TLS_WITHOUT_CLOCK
+static int verify_lan_printer_date(void *ctx, mbedtls_x509_crt *cert,
+                                   int depth, uint32_t *flags) {
   (void)ctx;
+  (void)cert;
+  (void)depth;
+  if (!clock_service_has_valid_wall_time()) {
+    *flags &= ~(MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE);
+  }
+  return 0;
+}
+
+/* ESP-TLS invokes this hook with peer verification required. Only the
+ * configured LAN printer uses this CA and the unsynchronized-clock exception. */
+static esp_err_t attach_lan_printer_ca(void *conf) {
+  mbedtls_ssl_conf_ca_chain(conf, &s.lan_ca, NULL);
+  mbedtls_ssl_conf_verify(conf, verify_lan_printer_date, NULL);
+  return ESP_OK;
+}
+#endif
+static uint64_t now_ms(void) {
   return (uint64_t)(esp_timer_get_time() / 1000);
 }
 static bool cancelled(void *ctx) {
   return printer_link_cancelled(((native_t *)ctx)->epoch);
 }
-enum { SEND_IDLE, SEND_QUEUED, SEND_EXECUTING, SEND_DONE, SEND_EXPIRED };
-static bool send_allowed(void *ctx) {
-  native_t *n = ctx;
-  return !cancelled(n) && atomic_load(&n->send_state) == SEND_EXECUTING &&
-         now_ms(NULL) < n->send_deadline;
-}
-static void wire_destroyed(void *ctx) { ((native_t *)ctx)->wire = NULL; }
 static void maybe_subscribed(native_t *n) {
   int expected_id = atomic_load(&n->subscription);
   if (expected_id < 0 || expected_id != atomic_load(&n->last_ack))
@@ -86,35 +88,28 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id,
   esp_mqtt_event_handle_t event = data;
   if (!event || event->client != n->client || cancelled(n))
     return;
-  if (id == MQTT_USER_EVENT) {
-    int expected = SEND_QUEUED;
-    if (event->msg_id != n->send_id ||
-        !atomic_compare_exchange_strong(&n->send_state, &expected,
-                                        SEND_EXECUTING))
-      return;
-    n->send_result = ESP_ERR_TIMEOUT;
-    if (send_allowed(n)) {
-      printer_deadline_transport_set(n->wire, n->send_deadline);
-      int result = esp_mqtt_client_publish(
-          n->client, n->send_topic, n->send_json, (int)n->send_len, 0, 0);
-      printer_deadline_transport_set(n->wire, 0);
-      n->send_result = result >= 0 ? ESP_OK : ESP_FAIL;
-    }
-    atomic_store(&n->send_state, SEND_DONE);
-  } else if (id == MQTT_EVENT_CONNECTED)
+  if (id == MQTT_EVENT_CONNECTED)
     printer_link_event_connected(n->epoch);
   else if (id == MQTT_EVENT_DISCONNECTED || id == MQTT_EVENT_ERROR)
     printer_link_invalidate(n->epoch);
   else if (id == MQTT_EVENT_SUBSCRIBED) {
+    if (event->error_handle &&
+        event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+      printer_link_invalidate(n->epoch);
+      return;
+    }
     atomic_store(&n->last_ack, event->msg_id);
     maybe_subscribed(n);
   } else if (id == MQTT_EVENT_DATA) {
     if (event->current_data_offset == 0 &&
         (event->topic_len != (int)strlen(n->report_topic) || !event->topic ||
-         memcmp(event->topic, n->report_topic, (size_t)event->topic_len)))
+         memcmp(event->topic, n->report_topic, (size_t)event->topic_len))) {
+      printer_frame_clear(&n->frame);
       return;
+    }
     if (event->data_len < 0 || event->current_data_offset < 0 ||
         event->total_data_len < 0) {
+      printer_frame_clear(&n->frame);
       printer_link_event_report_rejected(n->epoch);
       return;
     }
@@ -129,11 +124,13 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id,
     const char *json = NULL;
     size_t len = 0;
     printer_frame_result_t result =
-        printer_frame_feed(n->frame, &part, &json, &len);
-    if (result == PRINTER_FRAME_COMPLETE)
-      printer_link_event_report(n->epoch, json, len, now_ms(NULL));
-    else if (result == PRINTER_FRAME_REJECTED && !event->retain)
+        printer_frame_feed(&n->frame, &part, &json, &len);
+    if (result == PRINTER_FRAME_COMPLETE) {
+      printer_link_event_report(n->epoch, json, len, now_ms());
+      printer_frame_clear(&n->frame);
+    } else if (result == PRINTER_FRAME_REJECTED && !event->retain) {
       printer_link_event_report_rejected(n->epoch);
+    }
   }
 }
 static esp_err_t register_network(native_t *n) {
@@ -159,11 +156,11 @@ static void abort_link(void *ctx) {
     esp_mqtt_client_stop(n->client);
     esp_mqtt_client_destroy(n->client);
     n->client = NULL;
-    /* SDK owns/destroys the custom transport together with the client. */
-    n->wire = NULL;
   }
-  free(n->frame);
-  n->frame = NULL;
+#ifdef PRINTER_LAN_TLS_WITHOUT_CLOCK
+  mbedtls_x509_crt_free(&n->lan_ca);
+#endif
+  printer_frame_clear(&n->frame);
   memset(n->config.access_code, 0, sizeof(n->config.access_code));
 }
 static esp_err_t connect_link(const printer_connection_config_t *config,
@@ -180,53 +177,47 @@ static esp_err_t connect_link(const printer_connection_config_t *config,
   esp_netif_ip_info_t ip = {0};
   if (!sta || esp_netif_get_ip_info(sta, &ip) != ESP_OK || !ip.ip.addr)
     return ESP_ERR_INVALID_STATE;
-  /* No time-server wait: certificate validity dates are not checked
-   * (CONFIG_MBEDTLS_HAVE_TIME_DATE is off); CA and serial identity are. */
   if (cancelled(n))
     return ESP_ERR_INVALID_STATE;
-  n->frame = calloc(1, sizeof(*n->frame));
-  if (!n->frame)
-    return ESP_ERR_NO_MEM;
-  esp_transport_handle_t tls = esp_transport_ssl_init();
-  if (!tls) {
-    abort_link(n);
-    return ESP_ERR_NO_MEM;
+  uint8_t mac[6];
+  const esp_err_t mac_err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+  if (mac_err != ESP_OK)
+    return mac_err;
+  esp_err_t (*attach_certificate)(void *) = NULL;
+#ifdef PRINTER_LAN_TLS_WITHOUT_CLOCK
+  if (!clock_service_has_valid_wall_time()) {
+    mbedtls_x509_crt_init(&n->lan_ca);
+    if (mbedtls_x509_crt_parse(&n->lan_ca, (const unsigned char *)printer_bambu_ca,
+                              strlen(printer_bambu_ca) + 1U) != 0) {
+      abort_link(n);
+      return ESP_ERR_INVALID_STATE;
+    }
+    attach_certificate = attach_lan_printer_ca;
   }
-  esp_transport_ssl_set_cert_data(tls, printer_bambu_ca,
-                                  (int)strlen(printer_bambu_ca));
-  esp_transport_ssl_set_common_name(tls, n->config.serial);
-  n->wire = printer_deadline_transport_create(tls, now_ms, send_allowed, n);
-  if (!n->wire) {
-    abort_link(n);
-    return ESP_ERR_NO_MEM;
-  }
-  printer_deadline_transport_cleanup(n->wire, wire_destroyed, n);
-  atomic_store(&n->send_state, SEND_IDLE);
+#endif
   snprintf(n->report_topic, sizeof(n->report_topic), "device/%s/report",
            config->serial);
-  snprintf(n->client_id, sizeof(n->client_id), "heat-%s-%08lx", config->serial,
-           (unsigned long)n->epoch);
+  snprintf(n->client_id, sizeof(n->client_id), "p1s%02x%02x%02x%02x%02x%02x%08lx",
+           (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2],
+           (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5], (unsigned long)n->epoch);
   const esp_mqtt_client_config_t mqtt = {
       .broker.address = {.hostname = n->config.ipv4,
                          .port = 8883,
                          .transport = MQTT_TRANSPORT_OVER_SSL},
       .broker.verification = {.certificate = printer_bambu_ca,
                               .common_name = n->config.serial,
+                              .crt_bundle_attach = attach_certificate,
                               .skip_cert_common_name_check = false},
       .credentials = {.username = "bblp",
                       .client_id = n->client_id,
                       .authentication.password = n->config.access_code},
       .session = {.disable_clean_session = false, .keepalive = 30},
       .network = {.disable_auto_reconnect = true,
-                  .timeout_ms = 10000,
-                  .transport = n->wire},
+                  .timeout_ms = 10000},
       .buffer = {.size = 2048, .out_size = 1024},
       .task = {.stack_size = 6144, .priority = 3}};
   n->client = esp_mqtt_client_init(&mqtt);
   if (!n->client) {
-    /* init can fail before or after the SDK takes ownership of the wire. */
-    if (n->wire)
-      esp_transport_destroy(n->wire);
     abort_link(n);
     return ESP_ERR_NO_MEM;
   }
@@ -249,41 +240,9 @@ static esp_err_t subscribe_link(const char *topic, void *ctx) {
     maybe_subscribed(n);
   return id < 0 ? ESP_FAIL : ESP_OK;
 }
-static esp_err_t publish_link(const char *topic, const char *json, size_t len,
-                              uint64_t deadline, void *ctx) {
-  native_t *n = ctx;
-  if (!n->client || cancelled(n) || now_ms(NULL) >= deadline)
-    return ESP_ERR_INVALID_STATE;
-  if (len >= sizeof(n->send_json) || strlen(topic) >= sizeof(n->send_topic))
-    return ESP_ERR_INVALID_SIZE;
-  if (atomic_load(&n->send_state) == SEND_EXECUTING ||
-      atomic_load(&n->send_state) == SEND_QUEUED)
-    return ESP_ERR_INVALID_STATE;
-  strcpy(n->send_topic, topic);
-  memcpy(n->send_json, json, len);
-  n->send_json[len] = 0;
-  n->send_len = len;
-  n->send_deadline = deadline;
-  ++n->send_id;
-  atomic_store(&n->send_state, SEND_QUEUED);
-  esp_mqtt_event_t event = {.client = n->client, .msg_id = n->send_id};
-  /* User events run inside MQTT's task/API lock: no unbounded API mutex wait.
-   * An expired event is inert; QoS 0 never enters the retransmission outbox. */
-  if (esp_mqtt_dispatch_custom_event(n->client, &event) != ESP_OK) {
-    atomic_store(&n->send_state, SEND_EXPIRED);
-    return ESP_FAIL;
-  }
-  while (now_ms(NULL) < deadline && !cancelled(n)) {
-    if (atomic_load(&n->send_state) == SEND_DONE)
-      return n->send_result;
-    uint64_t left = deadline - now_ms(NULL);
-    vTaskDelay(pdMS_TO_TICKS(left < 10 ? left : 10));
-  }
-  (void)atomic_exchange(&n->send_state, SEND_EXPIRED);
-  return ESP_ERR_TIMEOUT;
-}
 const printer_link_ops_t *printer_transport_ops(void) {
   static const printer_link_ops_t ops = {
-      connect_link, subscribe_link, publish_link, abort_link, now_ms, &s};
+      .connect = connect_link, .subscribe = subscribe_link,
+      .abort = abort_link, .ctx = &s};
   return &ops;
 }

@@ -1,5 +1,10 @@
 #pragma once
 #include "esp_err.h"
+enum {
+    ERR_TCP_TRANSPORT_CONNECTION_FAILED = -2,
+    ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN = -1,
+    ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT = 0,
+};
 typedef struct fake_transport *esp_transport_handle_t;
 typedef int (*connect_func)(esp_transport_handle_t, const char *, int, int);
 typedef int (*io_read_func)(esp_transport_handle_t, char *, int, int);

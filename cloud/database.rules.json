@@ -1,0 +1,82 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "deviceRegistry": { ".indexOn": ["pendingUntil"] },
+    "pairingLimits": {
+      "$scope": {
+        ".indexOn": ["until"]
+      }
+    },
+    "owners": {
+      "$ownerUid": {
+        "devices": {
+          ".read": "auth != null && auth.uid === $ownerUid && auth.token.firebase.sign_in_provider === 'password' && root.child('owners').child($ownerUid).child('enabled').val() === true"
+        }
+      }
+    },
+    "devices": {
+      "$deviceUid": {
+        "latest": {
+          ".read": "auth != null && auth.token.firebase.sign_in_provider === 'password' && root.child('owners').child(auth.uid).child('enabled').val() === true && root.child('owners').child(auth.uid).child('devices').child($deviceUid).val() === true",
+          ".write": "auth != null && auth.uid === $deviceUid && root.child('deviceRegistry').child($deviceUid).child('active').val() === true && newData.exists()",
+          ".validate": "newData.hasChildren(['schemaVersion', 'updatedAt', 'name', 'firmwareVersion', 'state', 'fault', 'targetC', 'calibrationOffsetC', 'temperatureValid', 'heatEnabled', 'heaterOn', 'fanOn', 'printerConfigured', 'canMonitor', 'printerConnected', 'printerStateKnown', 'printerState', 'monitorPhase', 'updatePhase', 'updateResult', 'updateReceived', 'updateTotal', 'commandReady', 'sessionId']) && (!newData.child('restartC').exists() || (newData.child('restartC').val() >= newData.child('targetC').val() - 20 && newData.child('restartC').val() <= newData.child('targetC').val() - 0.5)) && newData.child('temperatureValid').val() === newData.child('temperatureC').exists() && (newData.child('commandReady').val() === true ? newData.child('sessionId').val().matches(/^[0-9a-f]{32}$/) : newData.child('sessionId').val() === '')",
+          "schemaVersion": { ".validate": "newData.val() === 1" },
+          "updatedAt": { ".validate": "newData.isNumber() && newData.val() >= now - 5000 && newData.val() <= now + 5000" },
+          "name": { ".validate": "newData.isString() && newData.val().length <= 22" },
+          "boardId": { ".validate": "newData.isString() && newData.val().matches(/^[0-9A-F]{12}$/)" },
+          "firmwareVersion": { ".validate": "newData.isString() && newData.val().length <= 32" },
+          "state": { ".validate": "newData.isString() && newData.val().matches(/^(boot|idle|heating|holding|fault)$/)" },
+          "fault": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 40" },
+          "targetC": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 80" },
+          "restartC": { ".validate": "newData.isNumber()" },
+          "calibrationOffsetC": { ".validate": "newData.isNumber() && newData.val() >= -10 && newData.val() <= 10" },
+          "temperatureValid": { ".validate": "newData.isBoolean()" },
+          "temperatureC": { ".validate": "newData.isNumber() && newData.val() >= -150 && newData.val() <= 150" },
+          "heatEnabled": { ".validate": "newData.isBoolean()" },
+          "restorePending": { ".validate": "newData.isBoolean()" },
+          "heaterOn": { ".validate": "newData.isBoolean()" },
+          "fanOn": { ".validate": "newData.isBoolean()" },
+          "printerConfigured": { ".validate": "newData.isBoolean()" },
+          "canMonitor": { ".validate": "newData.isBoolean()" },
+          "printerConnected": { ".validate": "newData.isBoolean()" },
+          "printerStateKnown": { ".validate": "newData.isBoolean()" },
+          "printerState": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 6" },
+          "monitorPhase": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 2" },
+          "canUpdate": { ".validate": "newData.isBoolean()" },
+          "updatePhase": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 8" },
+          "updateResult": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 12" },
+          "updateReceived": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4294967295" },
+          "updateTotal": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4294967295" },
+          "heap": {
+            ".validate": "newData.hasChildren(['freeBytes', 'minimumFreeBytes']) && newData.child('minimumFreeBytes').val() <= newData.child('freeBytes').val()",
+            "freeBytes": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4294967295 && newData.val() % 1 === 0" },
+            "minimumFreeBytes": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4294967295 && newData.val() % 1 === 0" },
+            "$other": { ".validate": false }
+          },
+          "commandReady": { ".validate": "newData.isBoolean()" },
+          "sessionId": { ".validate": "newData.isString() && newData.val().length <= 32" },
+          "$other": { ".validate": false }
+        },
+        "disableRevision": {
+          ".read": "auth != null && auth.token.firebase.sign_in_provider === 'password' && root.child('owners').child(auth.uid).child('enabled').val() === true && root.child('owners').child(auth.uid).child('devices').child($deviceUid).val() === true"
+        },
+        "commands": {
+          ".read": "auth != null && auth.uid === $deviceUid && root.child('deviceRegistry').child($deviceUid).child('active').val() === true"
+        },
+        "results": {
+          "$commandId": {
+            ".read": "auth != null && auth.token.firebase.sign_in_provider === 'password' && root.child('owners').child(auth.uid).child('enabled').val() === true && root.child('owners').child(auth.uid).child('devices').child($deviceUid).val() === true",
+            ".write": "auth != null && auth.uid === $deviceUid && root.child('deviceRegistry').child($deviceUid).child('active').val() === true && root.child('devices').child($deviceUid).child('commandReceipts').child($commandId).child('retainUntil').val() > now && newData.exists()",
+            ".validate": "newData.hasChildren(['id', 'status', 'reason', 'timestamp']) && (!data.exists() || (data.child('status').val() === newData.child('status').val() && data.child('reason').val() === newData.child('reason').val()))",
+            "id": { ".validate": "newData.val() === $commandId" },
+            "status": { ".validate": "newData.isString() && newData.val().matches(/^(applied|rejected|expired)$/)" },
+            "reason": { ".validate": "newData.isString() && newData.val().length <= 40" },
+            "timestamp": { ".validate": "newData.isNumber() && newData.val() >= now - 5000 && newData.val() <= now + 5000" },
+            "$other": { ".validate": false }
+          }
+        }
+      }
+    }
+  }
+}

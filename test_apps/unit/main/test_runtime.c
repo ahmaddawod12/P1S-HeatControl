@@ -28,8 +28,7 @@ typedef struct {
     temperature_sensor_fault_t sensor_fault;
     esp_err_t read_result;
     int output_calls;
-    bool heater_on;
-    bool fan_on;
+    bool relay_on;
     int save_calls;
     float saved_target;
 } fake_t;
@@ -60,14 +59,13 @@ static esp_err_t fake_read_sensor(temperature_sensor_reading_t *out_reading, voi
     return result;
 }
 
-static esp_err_t fake_set_outputs(bool heater_on, bool fan_on, void *ctx)
+static esp_err_t fake_set_relay(bool on, void *ctx)
 {
     (void) ctx;
     if (s_fail_outputs) return ESP_FAIL;
     fake_lock();
     ++s_fake.output_calls;
-    s_fake.heater_on = heater_on;
-    s_fake.fan_on = fan_on;
+    s_fake.relay_on = on;
     fake_unlock();
     return ESP_OK;
 }
@@ -90,7 +88,7 @@ static esp_err_t fake_save_calibration(float calibration_offset_c, void *ctx)
 
 static const app_runtime_ops_t k_fake_ops = {
     .read_sensor = fake_read_sensor,
-    .set_outputs = fake_set_outputs,
+    .set_relay = fake_set_relay,
     .save_target = fake_save_target,
     .save_calibration = fake_save_calibration,
     .ctx = NULL,
@@ -109,8 +107,7 @@ static void fake_reset(float temperature_c, temperature_sensor_fault_t sensor_fa
     s_fake.sensor_fault = sensor_fault;
     s_fake.read_result = ESP_OK;
     s_fake.output_calls = 0;
-    s_fake.heater_on = false;
-    s_fake.fan_on = false;
+    s_fake.relay_on = false;
     s_fake.save_calls = 0;
     s_fake.saved_target = 0.0f;
     fake_unlock();
@@ -135,15 +132,7 @@ static int fake_output_calls(void)
 static bool fake_heater_on(void)
 {
     fake_lock();
-    const bool on = s_fake.heater_on;
-    fake_unlock();
-    return on;
-}
-
-static bool fake_fan_on(void)
-{
-    fake_lock();
-    const bool on = s_fake.fan_on;
+    const bool on = s_fake.relay_on;
     fake_unlock();
     return on;
 }
@@ -174,14 +163,15 @@ static bool has_valid_samples(uint8_t count)
            status.temperature.consecutive_valid >= count;
 }
 
-/* Brings the runtime up with a healthy sensor and waits for regulation-ready
- * samples so enable commands are accepted. */
+/* Settle the sensor and the initial relay off interval for tests of later actions. */
 static void start_ready_runtime(float temperature_c)
 {
     reset_nvs();
     fake_reset(temperature_c, TEMPERATURE_SENSOR_FAULT_NONE);
     TEST_ESP_OK(app_runtime_start_with_ops(&k_fake_ops));
+    const int64_t boot_guard_elapsed = esp_timer_get_time() + 5100000;
     WAIT_FOR(has_valid_samples(3), 5000);
+    WAIT_FOR(esp_timer_get_time() >= boot_guard_elapsed, 5500);
 }
 
 TEST_CASE("runtime starts disabled with the stored target and outputs off",
@@ -205,7 +195,6 @@ TEST_CASE("runtime starts disabled with the stored target and outputs off",
     TEST_ASSERT_FALSE(status.fan_on);
     TEST_ASSERT_EQUAL_INT(1, fake_output_calls());
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
 
     app_runtime_stop();
 }
@@ -216,56 +205,13 @@ TEST_CASE("printer monitoring holds the heater while its permit is stale", "[run
     TEST_ESP_OK(app_runtime_set_enabled(true));
     WAIT_FOR(fake_heater_on(),1000);
     const uint64_t now=(uint64_t)esp_timer_get_time()/1000;
-    TEST_ESP_OK(app_runtime_monitor_begin(now+500));
-    WAIT_FOR(!fake_heater_on(),3000);
+    TEST_ESP_OK(app_runtime_monitor_begin(PRINTER_MONITOR_WATCHING, now + 500));
+    WAIT_FOR(!status_now().heater_on, 3000);
     TEST_ASSERT_TRUE(status_now().enabled);
-    app_runtime_monitor_end(true);
-    WAIT_FOR(!status_now().enabled,1000);
+    TEST_ASSERT_FALSE(status_now().fan_on);
+    TEST_ESP_OK(app_runtime_monitor_end(true));
+    TEST_ASSERT_FALSE(status_now().enabled);
     TEST_ASSERT_FALSE(app_runtime_monitor_active());
-    app_runtime_stop();
-}
-
-TEST_CASE("manual fan runs independently while heating is disabled",
-          "[runtime]")
-{
-    start_ready_runtime(25.0f);
-
-    TEST_ESP_OK(app_runtime_set_manual_fan(true));
-    WAIT_FOR(status_now().manual_fan_on && status_now().fan_on, 2000);
-    app_status_t status = status_now();
-    TEST_ASSERT_FALSE(status.enabled);
-    TEST_ASSERT_FALSE(status.heater_on);
-    TEST_ASSERT_TRUE(status.manual_fan_on);
-    TEST_ASSERT_TRUE(status.fan_on);
-
-    TEST_ESP_OK(app_runtime_set_manual_fan(false));
-    WAIT_FOR(!status_now().manual_fan_on && !status_now().fan_on, 2000);
-    status = status_now();
-    TEST_ASSERT_FALSE(status.enabled);
-    TEST_ASSERT_FALSE(status.heater_on);
-    TEST_ASSERT_FALSE(status.manual_fan_on);
-    TEST_ASSERT_FALSE(status.fan_on);
-
-    app_runtime_stop();
-}
-
-TEST_CASE("heating overrides a manual fan off request", "[runtime]")
-{
-    start_ready_runtime(50.0f);
-    TEST_ESP_OK(app_runtime_set_manual_fan(true));
-    WAIT_FOR(status_now().manual_fan_on && status_now().fan_on, 2000);
-
-    TEST_ESP_OK(app_runtime_set_enabled(true));
-    WAIT_FOR(state_is(HEAT_STATE_HEATING), 2000);
-    TEST_ESP_OK(app_runtime_set_manual_fan(false));
-    WAIT_FOR(!status_now().manual_fan_on, 2000);
-
-    const app_status_t status = status_now();
-    TEST_ASSERT_TRUE(status.enabled);
-    TEST_ASSERT_TRUE(status.heater_on);
-    TEST_ASSERT_FALSE(status.manual_fan_on);
-    TEST_ASSERT_TRUE(status.fan_on);
-
     app_runtime_stop();
 }
 
@@ -292,7 +238,7 @@ TEST_CASE("target updates are validated, persisted, and published", "[runtime]")
     app_runtime_stop();
 }
 
-TEST_CASE("enabling below target heats with one paired-on call", "[runtime]")
+TEST_CASE("enabling below target switches the shared relay on", "[runtime]")
 {
     start_ready_runtime(50.0f);
     TEST_ASSERT_EQUAL_INT(1, fake_output_calls());
@@ -306,12 +252,11 @@ TEST_CASE("enabling below target heats with one paired-on call", "[runtime]")
     TEST_ASSERT_TRUE(status.fan_on);
     TEST_ASSERT_EQUAL_INT(2, fake_output_calls());
     TEST_ASSERT_TRUE(fake_heater_on());
-    TEST_ASSERT_TRUE(fake_fan_on());
 
     app_runtime_stop();
 }
 
-TEST_CASE("enabling at target does not start fan cooldown", "[runtime]")
+TEST_CASE("enabling at target keeps the shared relay off", "[runtime]")
 {
     start_ready_runtime(60.0f);
 
@@ -323,12 +268,11 @@ TEST_CASE("enabling at target does not start fan cooldown", "[runtime]")
     TEST_ASSERT_FALSE(status.heater_on);
     TEST_ASSERT_FALSE(status.fan_on);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
 
     app_runtime_stop();
 }
 
-TEST_CASE("reaching target starts fan cooldown", "[runtime]")
+TEST_CASE("reaching target stops the heater and fan together", "[runtime]")
 {
     start_ready_runtime(50.0f);
     TEST_ESP_OK(app_runtime_set_enabled(true));
@@ -340,14 +284,13 @@ TEST_CASE("reaching target starts fan cooldown", "[runtime]")
     const app_status_t status = status_now();
     TEST_ASSERT_TRUE(status.enabled);
     TEST_ASSERT_FALSE(status.heater_on);
-    TEST_ASSERT_TRUE(status.fan_on);
+    TEST_ASSERT_FALSE(status.fan_on);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_TRUE(fake_fan_on());
 
     app_runtime_stop();
 }
 
-TEST_CASE("disable stops heater and keeps fan on for cooldown", "[runtime]")
+TEST_CASE("disable stops the heater and fan together", "[runtime]")
 {
     start_ready_runtime(50.0f);
     TEST_ESP_OK(app_runtime_set_enabled(true));
@@ -358,14 +301,13 @@ TEST_CASE("disable stops heater and keeps fan on for cooldown", "[runtime]")
 
     const app_status_t status = status_now();
     TEST_ASSERT_FALSE(status.heater_on);
-    TEST_ASSERT_TRUE(status.fan_on);
+    TEST_ASSERT_FALSE(status.fan_on);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_TRUE(fake_fan_on());
 
     app_runtime_stop();
 }
 
-TEST_CASE("target zero stops heater and keeps fan on for cooldown", "[runtime]")
+TEST_CASE("target zero stops the heater and fan together", "[runtime]")
 {
     start_ready_runtime(50.0f);
     TEST_ESP_OK(app_runtime_set_enabled(true));
@@ -378,14 +320,13 @@ TEST_CASE("target zero stops heater and keeps fan on for cooldown", "[runtime]")
     TEST_ASSERT_FALSE(status.enabled);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, status.target_c);
     TEST_ASSERT_FALSE(status.heater_on);
-    TEST_ASSERT_TRUE(status.fan_on);
+    TEST_ASSERT_FALSE(status.fan_on);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_TRUE(fake_fan_on());
 
     app_runtime_stop();
 }
 
-TEST_CASE("five failed sensor reads stop heating and keep fan cooling", "[runtime]")
+TEST_CASE("five failed sensor reads stop the heater and fan together", "[runtime]")
 {
     start_ready_runtime(50.0f);
     TEST_ESP_OK(app_runtime_set_enabled(true));
@@ -396,7 +337,7 @@ TEST_CASE("five failed sensor reads stop heating and keep fan cooling", "[runtim
         WAIT_FOR(status_now().temperature.consecutive_failures == failures, 2000);
         TEST_ASSERT_EQUAL_INT(HEAT_FAULT_NONE, status_now().fault);
         TEST_ASSERT_TRUE(fake_heater_on());
-        TEST_ASSERT_TRUE(fake_fan_on());
+        TEST_ASSERT_TRUE(status_now().fan_on);
     }
     WAIT_FOR(state_is(HEAT_STATE_FAULT), 2000);
 
@@ -405,9 +346,8 @@ TEST_CASE("five failed sensor reads stop heating and keep fan cooling", "[runtim
     TEST_ASSERT_FALSE(status.enabled);
     TEST_ASSERT_FALSE(status.heater_on);
     TEST_ASSERT_EQUAL_UINT8(5U, status.temperature.consecutive_failures);
-    TEST_ASSERT_TRUE(status.fan_on);
+    TEST_ASSERT_FALSE(status.fan_on);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_TRUE(fake_fan_on());
     TEST_ASSERT_EQUAL_INT(3, fake_output_calls());
 
     app_runtime_stop();
@@ -441,13 +381,11 @@ TEST_CASE("a reported startup fault latches with outputs off", "[runtime]")
     WAIT_FOR(state_is(HEAT_STATE_FAULT), 2000);
     TEST_ASSERT_EQUAL(HEAT_FAULT_NVS, status_now().fault);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
 
     TEST_ESP_OK(app_runtime_set_enabled(true));
     vTaskDelay(pdMS_TO_TICKS(300));
     TEST_ASSERT_EQUAL(HEAT_STATE_FAULT, status_now().state);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
 
     TEST_ESP_OK(app_runtime_ack_fault());
     WAIT_FOR(state_is(HEAT_STATE_IDLE), 2000);
@@ -488,7 +426,6 @@ TEST_CASE("recovered settings corruption latches an NVS fault", "[runtime]")
     TEST_ASSERT_EQUAL(HEAT_FAULT_NVS, status.fault);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, status.target_c);
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
 
     app_runtime_stop();
 }
@@ -500,12 +437,10 @@ TEST_CASE("maintenance blocks queued enable and target persistence", "[runtime]"
     TEST_ESP_OK(app_runtime_begin_maintenance(15000));
     TEST_ASSERT_TRUE(app_runtime_maintenance_active());
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
     const int saves = s_fake.save_calls;
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, app_runtime_set_enabled(true));
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, app_runtime_set_target(55.5f));
     TEST_ASSERT_EQUAL(saves, s_fake.save_calls);
-    TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, app_runtime_set_manual_fan(true));
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, app_runtime_ack_fault());
     TEST_ESP_OK(app_runtime_set_enabled(false));
     TEST_ESP_OK(app_runtime_end_maintenance());
@@ -514,16 +449,14 @@ TEST_CASE("maintenance blocks queued enable and target persistence", "[runtime]"
     app_runtime_stop();
 }
 
-TEST_CASE("maintenance clears manual fan after cooldown", "[runtime]")
+TEST_CASE("maintenance confirms the shared relay is off before proceeding", "[runtime]")
 {
     start_ready_runtime(25.0f);
     TEST_ESP_OK(app_runtime_set_enabled(true));
     WAIT_FOR(fake_heater_on(), 2000);
-    TEST_ESP_OK(app_runtime_set_manual_fan(true));
-    TEST_ESP_OK(app_runtime_begin_maintenance(15000));
+    TEST_ESP_OK(app_runtime_begin_maintenance(2000));
     TEST_ASSERT_FALSE(fake_heater_on());
-    TEST_ASSERT_FALSE(fake_fan_on());
-    TEST_ASSERT_FALSE(status_now().manual_fan_on);
+    TEST_ASSERT_FALSE(status_now().fan_on);
     TEST_ESP_OK(app_runtime_end_maintenance());
     app_runtime_stop();
 }

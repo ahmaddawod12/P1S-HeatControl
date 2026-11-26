@@ -24,6 +24,7 @@ typedef struct { int unused; } wifi_init_config_t;
 esp_err_t esp_wifi_init(const wifi_init_config_t *);
 esp_err_t esp_wifi_set_storage(int);
 esp_err_t esp_wifi_set_mode(wifi_mode_t);
+esp_err_t esp_wifi_get_mac(int, uint8_t mac[6]);
 esp_err_t esp_wifi_get_config(int, wifi_config_t *);
 esp_err_t esp_wifi_set_config(int, const wifi_config_t *);
 esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *);

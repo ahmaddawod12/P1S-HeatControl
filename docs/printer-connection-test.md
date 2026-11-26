@@ -1,5 +1,8 @@
 # Wi-Fi change and first printer connection test
 
+This procedure records tests for earlier LAN firmware. Use the hosted
+dashboard and setup flow for current builds. [Current setup](../README.md#wi-fi-setup-and-dashboard-access)
+
 Prepared 2026-11-07. Use the network currently connected on the PC, as requested
 by the owner. This procedure tests monitoring with the printer idle and the
 chamber outputs disabled. USB serial, the network change and the first live
@@ -12,8 +15,8 @@ record at the end is historical and was collected with the earlier firmware.
 ## Before connecting the board
 
 - Have a USB **data** cable and identify the ESP32 Dev Kit / ESP32-WROOM-32.
-- Disconnect both relay loads, including the 220 VAC heater. USB power is
-  sufficient for this connection test; leave heating and manual fan disabled.
+- Disconnect the relay loads, including the 220 VAC heater. USB power is
+  sufficient for this connection test. Leave heating disabled.
 - Have the current Wi-Fi name and password available locally. The classic
   ESP32 and P1S need 2.4 GHz. The PC can stay on 5 GHz if both bands share the
   same LAN. Avoid guest/client isolation between the devices. The P1S radio
@@ -66,7 +69,7 @@ Look for the installed firmware/version banner and these messages (order can
 differ, and a working station may not need the hotspot):
 
 ```text
-controller ready and disabled; open http://p1s-heat.local
+controller services started
 connected as <controller-ip> (rssi <value>)
 setup hotspot started at 192.168.4.1
 ```
@@ -89,7 +92,7 @@ A local build's version does not identify the image installed on the board.
 4. Return the phone/PC to the target network. Open the recorded controller IP
    or [http://p1s-heat.local/](http://p1s-heat.local/). If name discovery fails,
    use serial/the router to find the IP. `192.168.4.1` is only the setup address.
-5. Confirm heating and manual fan remain disabled. For rejected credentials,
+5. Confirm heating remains disabled. For rejected credentials,
    return to the hotspot and correct them. A lost browser reply alone does
    not prove failure; inspect serial/current status before retrying Save.
 
@@ -114,11 +117,10 @@ the first connection and retries as an observation window, not a guaranteed
 deadline.
 
 The firmware verifies the Bambu CA and printer serial as the certificate name.
-Keep TLS verification enabled. It subscribes to `device/<serial>/report` and
-requests a `pushall` snapshot on `device/<serial>/request` once when it
-connects (and, while the state is unknown, at most once every 5 minutes). It
-never starts jobs, moves axes, changes printer temperatures or sends any other
-command.
+It subscribes to `device/<serial>/report` and uses the print-state field from
+regular updates. The connection can be online while the print state remains
+**Unknown**. Observe the next update that includes the print state before
+checking the dashboard value.
 
 Leave **Monitor P1S** unused during this monitoring test; chamber heating stays
 disabled.
@@ -174,8 +176,9 @@ detailed TLS errors.
 ## 5. Recovery and failure isolation
 
 After the observation, press EN once with relay loads disconnected. Verify
-saved Wi-Fi/printer settings restore, monitoring reconnects, and outputs stay
-off. Record this separately. Router-outage and printer-job tests come later.
+that the saved Wi-Fi and printer connections return and that a session already
+watching a print ends with heating disabled. Record this separately.
+Router-outage and printer-job tests come later.
 
 | Symptom | Next check |
 |---|---|
@@ -209,7 +212,7 @@ job names as appropriate. Preserve status flags and event timing.
 | Printer port and controller configuration | PC reached printer TCP 8883; controller accepted one config PUT with 202 and reported `config_result: saved` with code present |
 | Verified connection / fresh, complete reports | Passed initial live connection: `connected`, `fresh`, `baseline_valid` true; printer reported idle; inactive cycle `ready`, `can_arm: false`, `resume_attempted: false` |
 | Five-minute stability and outputs off | Partial, strict freshness check failed: 31 samples over 300.6 s; connected/baseline valid throughout; 28 fresh and 3 stale samples (50, 60, 190 s); no observed reboot; heating/heater/fan/manual fan false and Resume not attempted throughout |
-| Reset restores monitoring with outputs off | Pending |
+| Reset restores the printer link and keeps the relay off after a watched print | Pending |
 
 These PC tests do not validate the installed board image or a real printer.
 Successful monitoring also does not qualify preheat/Resume; use the separate

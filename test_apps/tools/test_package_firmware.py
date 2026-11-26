@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from package_firmware import package_firmware, verify_package, validate_bootstrap
+from package_firmware import package_firmware, verify_package
 
 NAME = "p1s-heat-controller-esp32-4mb.bin"
 PARTITIONS = [
@@ -50,6 +50,10 @@ class PackageFirmwareTests(unittest.TestCase):
             "SECURE_SIGNED_APPS_ECDSA_SCHEME": True,
             "SECURE_BOOT_VERIFICATION_KEY": str(self.public),
             "P1S_WIFI_SSID": "", "P1S_WIFI_PASSWORD": "", "P1S_RELAY_ACTIVE_LOW": False,
+            "MBEDTLS_HAVE_TIME_DATE": True, "P1S_FIREBASE_ENABLED": True,
+            "P1S_FIREBASE_PUBLIC_RELEASE": True,
+            "P1S_FIREBASE_DATABASE_URL": "https://fixture-default-rtdb.firebaseio.com",
+            "P1S_FIREBASE_API_KEY": "fixture-key", "P1S_FIREBASE_PAIRING_URL": "https://example.invalid/api",
             "P1S_RELEASE_REPOSITORY": "ahmaddawod12/P1S-HeatControl"}
         self.write_config()
         (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=OFF\n")
@@ -66,7 +70,7 @@ class PackageFirmwareTests(unittest.TestCase):
         data[48:80] = b"p1s_heat_controller".ljust(32, b"\0")
         data[112:144] = b"v6.1".ljust(32, b"\0")
         data[256:372] = struct.pack("<II24s24s24s32sI", 0x31533150, 2,
-            b"p1s-heat-controller", b"esp32-wroom-32", b"p1s-4m-ota-v1", b"1.0.0", 0)
+            b"p1s-heat-controller", b"esp32-wroom-32-1relay", b"p1s-4m-ota-v1", b"1.0.0", 0)
         data[500:564] = self.public.read_bytes()
         firmware = image.ESP32FirmwareImage()
         firmware.entrypoint = 0x40080000
@@ -76,12 +80,10 @@ class PackageFirmwareTests(unittest.TestCase):
         self.firmware, self.data = firmware, data
         self.sign_image()
 
-    def sign_image(self, personal=False):
-        # Same product/version and valid signer, but a signed personal-purpose
-        # marker and a compiled seed. Generic metadata must not mask this.
-        struct.pack_into("<I", self.data, 368, 3 if personal else 0)
-        if personal:
-            self.data[400:424] = b"fixture-network-password"
+    def sign_image(self, personal=False, pilot=False, *, no_firebase=False):
+        flags = (3 if personal else 0) | (4 if pilot else 0) | (8 if no_firebase else 0)
+        struct.pack_into("<I", self.data, 368, flags)
+        self.data[400:424] = b"fixture-network-password" if personal else bytes(24)
         self.firmware.segments[0].data = bytes(self.data)
         unsigned = self.build / "p1s_heat_controller.bin"
         self.firmware.save(str(unsigned))
@@ -108,28 +110,46 @@ class PackageFirmwareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             package_firmware(self.build, self.public, self.output, "1.0.0")
 
+    def test_rejects_unconfigured_firmware_for_release(self):
+        self.sign_image(no_firebase=True)
+        with self.assertRaisesRegex(ValueError, "no Firebase configuration"):
+            package_firmware(self.build, self.public, self.output, "1.0.0")
+
+    def test_rejects_public_firebase_pilot_config_and_signed_image(self):
+        for key, value, error in (
+            ("P1S_FIREBASE_ENABLED", False, "public Firebase profile"),
+            ("P1S_FIREBASE_PUBLIC_RELEASE", False, "public Firebase profile"),
+            ("P1S_FIREBASE_SETUP_PASSPHRASE", "fixture-hotspot-password", "must generate its setup passphrase"),
+        ):
+            original = self.config.get(key)
+            self.config[key] = value
+            self.write_config()
+            with self.assertRaisesRegex(ValueError, error):
+                package_firmware(self.build, self.public, self.output, "1.0.0")
+            if original is None:
+                del self.config[key]
+            else:
+                self.config[key] = original
+        self.write_config()
+        self.sign_image(pilot=True)
+        with self.assertRaisesRegex(ValueError, "signed image purpose"):
+            package_firmware(self.build, self.public, self.output, "1.0.0")
+
+    def test_rejects_signed_dual_relay_image(self):
+        struct.pack_into("<24s", self.data, 288, b"esp32-wroom-32")
+        self.sign_image()
+        with self.assertRaisesRegex(ValueError, "wrong signed board"):
+            package_firmware(self.build, self.public, self.output, "1.0.0")
+
     def write_config(self):
         (self.build / "config/sdkconfig.json").write_text(json.dumps(self.config))
 
-    def prepare_bootstrap(self):
-        self.config.update(P1S_WIFI_SSID="fixture-network", P1S_WIFI_PASSWORD="fixture-password")
-        self.write_config()
-        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
-        self.sign_image(personal=True)
-
     def assert_security_rejected(self, reason):
         self.write_config()
-        for profile in ("generic", "bootstrap"):
-            with self.subTest(profile=profile):
-                if profile == "generic":
-                    with self.assertRaisesRegex(ValueError, reason):
-                        package_firmware(self.build, self.public, self.output, "1.0.0")
-                else:
-                    self.prepare_bootstrap()
-                    with self.assertRaisesRegex(ValueError, reason):
-                        validate_bootstrap(self.build, self.public, "1.0.0")
+        with self.assertRaisesRegex(ValueError, reason):
+            package_firmware(self.build, self.public, self.output, "1.0.0")
 
-    def test_rejects_flash_encryption_before_packaging_or_bootstrap(self):
+    def test_rejects_flash_encryption_before_packaging(self):
         self.config["SECURE_FLASH_ENC_ENABLED"] = True
         self.assert_security_rejected("flash encryption")
 
@@ -159,8 +179,6 @@ class PackageFirmwareTests(unittest.TestCase):
         self.config["SECURE_BOOT_VERIFICATION_KEY"] = "keys/update.bin"
         self.write_config()
         self.assertEqual(package_firmware(self.build, self.public, self.output, "1.0.0")["version"], "1.0.0")
-        self.prepare_bootstrap()
-        self.assertEqual(validate_bootstrap(self.build, self.public, "1.0.0")["version"], "1.0.0")
 
     def test_signed_asset_manifest_matches_bytes(self):
         import hashlib
@@ -210,40 +228,18 @@ class PackageFirmwareTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "layout"):
             package_firmware(self.build, self.public, self.output, "1.0.0")
 
-    def test_rejects_active_low_release_and_bootstrap_profiles(self):
+    def test_rejects_active_low_release_profile(self):
         self.config["P1S_RELAY_ACTIVE_LOW"] = True
         self.write_config()
         with self.assertRaisesRegex(ValueError, "hardware profile"):
             package_firmware(self.build, self.public, self.output, "1.0.0")
-        self.config["P1S_WIFI_SSID"] = "fixture-network"
-        self.config["P1S_WIFI_PASSWORD"] = "fixture-password"
-        self.write_config()
-        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
-        self.sign_image(personal=True)
-        with self.assertRaisesRegex(ValueError, "hardware profile"):
-            validate_bootstrap(self.build, self.public, "1.0.0")
-
-    def test_bootstrap_requires_explicit_local_credentials(self):
-        with self.assertRaises(ValueError): validate_bootstrap(self.build, self.public, "1.0.0")
-        self.config["P1S_WIFI_SSID"] = "fixture-network"
-        self.config["P1S_WIFI_PASSWORD"] = "fixture-password"
-        self.write_config()
-        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
-        self.sign_image(personal=True)
-        self.assertEqual(validate_bootstrap(self.build, self.public, "1.0.0")["version"], "1.0.0")
-        with self.assertRaises(ValueError): package_firmware(self.build, self.public, self.output, "1.0.0")
+            self.config[field] = valid
 
     def test_rejects_obsolete_update_repository(self):
         self.config["P1S_RELEASE_REPOSITORY"] = "ahmaddawod12/P1S-HeatControl-Releases"
         self.write_config()
         with self.assertRaisesRegex(ValueError, "release repository"):
             package_firmware(self.build, self.public, self.output, "1.0.0")
-        self.config.update(P1S_WIFI_SSID="fixture-network", P1S_WIFI_PASSWORD="fixture-password")
-        self.write_config()
-        (self.build / "CMakeCache.txt").write_text("P1S_BOOTSTRAP_CREDENTIALS:BOOL=ON\n")
-        self.sign_image(personal=True)
-        with self.assertRaisesRegex(ValueError, "release repository"):
-            validate_bootstrap(self.build, self.public, "1.0.0")
 
     def test_publication_checks_package_against_rebuilt_application(self):
         package_firmware(self.build, self.public, self.output, "1.0.0")

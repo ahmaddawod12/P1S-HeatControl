@@ -6,6 +6,7 @@
 #include <windows.h>
 static atomic_uint now, starts, stops, waits;
 static atomic_bool valid_clock, cancel, slow;
+static bool drop_sync;
 static bool borrowed;
 static uint64_t mono(void) { return atomic_load(&now); }
 static bool valid(void) { return atomic_load(&valid_clock); }
@@ -14,14 +15,15 @@ static esp_err_t start(const char *host) {
   atomic_fetch_add(&starts, 1);
   return borrowed ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
-static void wait_clock(uint32_t ms) {
+static bool wait_clock(uint32_t ms) {
   assert(ms <= 100);
   atomic_fetch_add(&now, ms);
   unsigned n = atomic_fetch_add(&waits, 1) + 1;
   if (atomic_load(&slow))
     Sleep(5);
-  if (n >= 3)
-    atomic_store(&valid_clock, true);
+  if (n < 3 || drop_sync) return false;
+  atomic_store(&valid_clock, true);
+  return true;
 }
 static void stop(void) { atomic_fetch_add(&stops, 1); }
 static void sleep_clock(uint32_t ms) {
@@ -37,7 +39,7 @@ static const clock_service_ops_t ops = {mono,       valid, start,
 static void reset(void) {
   now = starts = stops = waits = 0;
   valid_clock = cancel = slow = false;
-  borrowed = false;
+  borrowed = drop_sync = false;
 }
 static void test_shared_clock_cancellation(void) {
   reset();
@@ -54,6 +56,34 @@ static void test_shared_clock_cancellation(void) {
          ESP_OK);
   assert(starts == 1);
 }
+static void test_clock_freshness_requires_confirmed_sync(void) {
+  reset();
+  now = 100000U;
+  valid_clock = true;
+  assert(!clock_service_is_recent_with_ops(&ops, 60));
+  assert(clock_service_sync_with_ops(&ops, "lan.example", 1000) == ESP_OK);
+  assert(starts == 1 && stops == 1);
+  assert(clock_service_is_recent_with_ops(&ops, 60));
+  atomic_fetch_add(&now, 59000U);
+  assert(clock_service_is_recent_with_ops(&ops, 60));
+  atomic_fetch_add(&now, 1000U);
+  assert(!clock_service_is_recent_with_ops(&ops, 60));
+
+  drop_sync = true;
+  assert(clock_service_sync_with_ops(&ops, "lan.example", 500) == ESP_ERR_TIMEOUT);
+  assert(valid_clock && !clock_service_is_recent_with_ops(&ops, 60));
+  drop_sync = false;
+  borrowed = true;
+  assert(clock_service_sync_with_ops(&ops, "lan.example", 1000) == ESP_ERR_INVALID_STATE);
+  assert(stops == 2 && !clock_service_is_recent_with_ops(&ops, 60));
+
+  borrowed = false;
+  assert(clock_service_sync_with_ops(&ops, "lan.example", 1000) == ESP_OK);
+  assert(clock_service_is_recent_with_ops(&ops, 60));
+  valid_clock = false;
+  assert(!clock_service_is_recent_with_ops(&ops, 60));
+}
+
 static void *caller(void *p) {
   (void)p;
   assert(clock_service_wait_with_ops(&ops, "lan.example", 30000, NULL, NULL) ==
@@ -70,5 +100,6 @@ int main(void) {
   pthread_join(a, NULL);
   pthread_join(b, NULL);
   assert(starts == 1 && stops == 1);
+  test_clock_freshness_requires_confirmed_sync();
   return 0;
 }

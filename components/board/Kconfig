@@ -1,11 +1,11 @@
 menu "P1S Heat Controller Board"
 
 config P1S_RELAY_ACTIVE_LOW
-    bool "Relay channels are active low"
+    bool "The heater and fan relay is active low"
     default n
     help
         Enable for relay boards that energize when the control input is low.
-        The default is active high: LOW is off and HIGH is on. Both channels
-        initialize at the inactive level before their output drivers are enabled.
+        The default is active high: LOW is off and HIGH is on. The relay GPIO
+        initializes at the inactive level before its output driver is enabled.
 
 endmenu

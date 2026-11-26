@@ -7,6 +7,7 @@
 static temperature_sample_t valid_sample(float temperature_c)
 {
     return (temperature_sample_t) {
+        .probe_c = temperature_c,
         .raw_c = temperature_c,
         .filtered_c = temperature_c,
         .valid = true,
@@ -50,6 +51,7 @@ TEST_CASE("controller applies one degree hysteresis", "[controller]")
 
     reading = valid_sample(60.0f);
     heat_controller_step(&controller, &reading, 6000U);
+    heat_controller_note_relay_off(&controller, 6000U);
     TEST_ASSERT_EQUAL(HEAT_STATE_HOLDING,
                       heat_controller_snapshot(&controller).state);
     reading = valid_sample(59.1f);
@@ -75,6 +77,7 @@ TEST_CASE("controller fault bypasses relay transition interval",
                                              &reading,
                                              0U));
     reading = (temperature_sample_t) {
+        .probe_c = NAN,
         .raw_c = NAN,
         .filtered_c = NAN,
         .valid = false,

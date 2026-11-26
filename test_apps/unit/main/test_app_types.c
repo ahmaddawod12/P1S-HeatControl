@@ -11,6 +11,6 @@ TEST_CASE("status starts disabled with relays off", "[app_types]")
     TEST_ASSERT_FALSE(status.enabled);
     TEST_ASSERT_FALSE(status.heater_on);
     TEST_ASSERT_FALSE(status.fan_on);
-    TEST_ASSERT_FALSE(status.manual_fan_on);
+    TEST_ASSERT_FALSE(status.restore_pending);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, status.target_c);
 }

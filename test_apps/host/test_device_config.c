@@ -1,6 +1,7 @@
 #include "device_config.h"
 #include "nvs.h"
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,7 +9,7 @@
  * validation, seed precedence and failure propagation. */
 typedef struct {
   char key[16];
-  unsigned char bytes[384];
+  unsigned char bytes[sizeof(device_firebase_session_t) + 4];
   size_t size;
 } record_t;
 static record_t records[6], pending;
@@ -79,6 +80,64 @@ void nvs_close(nvs_handle_t h) {
   (void)h;
   memset(&pending, 0, sizeof(pending));
   erase_key[0] = 0;
+}
+
+static void test_firebase_session_survives_rotation_failure(void)
+{
+    memset(records, 0, sizeof(records));
+    init_result = ESP_OK;
+    commit_result = ESP_OK;
+    device_firebase_session_t saved = {
+        .database_url = "https://p1s-test.firebaseio.com",
+        .uid = "test-controller",
+        .refresh_token = "first-test-token",
+    };
+    device_firebase_session_t loaded = {0};
+    assert(device_config_init() == ESP_OK);
+    assert(device_config_load_firebase(&loaded) == ESP_ERR_NOT_FOUND);
+    const size_t legacy_bytes = offsetof(device_firebase_session_t, pairing_pending);
+    strcpy(records[0].key, "firebase_v1");
+    records[0].size = 4 + legacy_bytes;
+    records[0].bytes[0] = 1;
+    memcpy(records[0].bytes + 4, &saved, legacy_bytes);
+    assert(device_config_load_firebase(&loaded) == ESP_OK);
+    assert(!loaded.pairing_pending && !loaded.recovery_key[0] && !loaded.recovery_pending);
+    assert(strcmp(loaded.refresh_token, saved.refresh_token) == 0);
+
+    records[1] = records[0];
+    strcpy(records[1].key, "firebase_v2");
+    records[1].bytes[0] = 2;
+    records[1].bytes[records[1].size++] = 1;
+    assert(device_config_load_firebase(&loaded) == ESP_OK);
+    assert(loaded.pairing_pending && !loaded.recovery_key[0] && !loaded.recovery_pending);
+
+    saved.pairing_pending = true;
+    saved.recovery_pending = true;
+    assert(device_config_save_firebase(&saved) == ESP_ERR_INVALID_ARG);
+    memset(saved.recovery_key, 'a', sizeof(saved.recovery_key) - 1U);
+    assert(device_config_save_firebase(&saved) == ESP_OK);
+    assert(device_config_init() == ESP_OK);
+    assert(device_config_load_firebase(&loaded) == ESP_OK);
+    assert(loaded.pairing_pending && loaded.recovery_pending);
+    assert(strcmp(loaded.recovery_key, saved.recovery_key) == 0);
+    assert(strcmp(loaded.database_url, saved.database_url) == 0 && strcmp(loaded.uid, saved.uid) == 0);
+    strcpy(saved.refresh_token, "rotated-test-token");
+    commit_result = ESP_FAIL;
+    assert(device_config_save_firebase(&saved) == ESP_FAIL);
+    assert(device_config_load_firebase(&loaded) == ESP_OK);
+    assert(loaded.pairing_pending && strcmp(loaded.refresh_token, "first-test-token") == 0);
+    assert(loaded.recovery_pending && strcmp(loaded.recovery_key, saved.recovery_key) == 0);
+    commit_result = ESP_OK;
+    assert(device_config_save_firebase(&saved) == ESP_OK);
+    assert(device_config_load_firebase(&loaded) == ESP_OK);
+    assert(loaded.pairing_pending && strcmp(loaded.refresh_token, saved.refresh_token) == 0);
+    saved.pairing_pending = false;
+    saved.recovery_pending = false;
+    assert(device_config_save_firebase(&saved) == ESP_OK);
+    assert(device_config_load_firebase(&loaded) == ESP_OK);
+    assert(!loaded.pairing_pending && !loaded.recovery_pending);
+    assert(strcmp(loaded.refresh_token, saved.refresh_token) == 0);
+    assert(strcmp(loaded.recovery_key, saved.recovery_key) == 0);
 }
 
 static void test_saved_wifi_wins_over_bootstrap(void)
@@ -192,22 +251,70 @@ static void test_wifi_replace_preserves_exact_bytes_and_failed_commit(void)
 }
 static void test_bootstrap_confirmation_requires_a_committed_record(void)
 {
-    assert(device_config_bootstrap_confirmed() == ESP_ERR_NOT_FOUND);
+    assert(device_config_bootstrap_confirmed(NULL) == ESP_ERR_NOT_FOUND);
     commit_result = ESP_FAIL;
-    assert(device_config_confirm_bootstrap() == ESP_FAIL);
-    assert(device_config_bootstrap_confirmed() == ESP_ERR_NOT_FOUND);
+    assert(device_config_confirm_bootstrap(NULL) == ESP_FAIL);
+    assert(device_config_bootstrap_confirmed(NULL) == ESP_ERR_NOT_FOUND);
     commit_result = ESP_OK;
-    assert(device_config_confirm_bootstrap() == ESP_OK);
+    assert(device_config_confirm_bootstrap(NULL) == ESP_OK);
     assert(device_config_init() == ESP_OK);
-    assert(device_config_bootstrap_confirmed() == ESP_OK);
+    assert(device_config_bootstrap_confirmed(NULL) == ESP_OK);
     for (unsigned i=0; i<4; ++i) if (strcmp(records[i].key,"boot_ok_v1")==0) {
         records[i].bytes[0]=2;
         const record_t before=records[i];
-        assert(device_config_confirm_bootstrap() != ESP_OK);
+        assert(device_config_confirm_bootstrap(NULL) != ESP_OK);
         assert(memcmp(&before,&records[i],sizeof(before))==0);
     }
 }
+
+static void test_pilot_confirmation_is_bound_to_the_image(void)
+{
+    memset(records, 0, sizeof(records));
+    init_result = ESP_OK;
+    commit_result = ESP_OK;
+    const uint8_t first[DEVICE_BOOTSTRAP_HASH_BYTES] = {1};
+    const uint8_t second[DEVICE_BOOTSTRAP_HASH_BYTES] = {2};
+    assert(device_config_init() == ESP_OK);
+    assert(device_config_confirm_bootstrap(NULL) == ESP_OK);
+    assert(device_config_bootstrap_confirmed(first) == ESP_ERR_NOT_FOUND);
+    assert(device_config_confirm_bootstrap(first) == ESP_OK);
+    assert(device_config_bootstrap_confirmed(first) == ESP_OK);
+    assert(device_config_bootstrap_confirmed(second) == ESP_ERR_NOT_FOUND);
+    commit_result = ESP_FAIL;
+    assert(device_config_confirm_bootstrap(second) == ESP_FAIL);
+    assert(device_config_bootstrap_confirmed(first) == ESP_OK);
+    assert(device_config_bootstrap_confirmed(second) == ESP_ERR_NOT_FOUND);
+    commit_result = ESP_OK;
+    assert(device_config_confirm_bootstrap(second) == ESP_OK);
+    assert(device_config_bootstrap_confirmed(second) == ESP_OK);
+    assert(device_config_bootstrap_confirmed(first) == ESP_ERR_NOT_FOUND);
+    assert(device_config_bootstrap_confirmed(NULL) == ESP_OK);
+}
+
+static void test_setup_passphrase_is_committed_and_validated(void)
+{
+    char passphrase[DEVICE_SETUP_PASSPHRASE_BYTES] = "0123456789abcdef0123456789abcdef";
+    char loaded[DEVICE_SETUP_PASSPHRASE_BYTES];
+    memset(records, 0, sizeof(records));
+    assert(device_config_init() == ESP_OK);
+    assert(device_config_load_setup_passphrase(loaded) == ESP_ERR_NOT_FOUND);
+    commit_result = ESP_FAIL;
+    assert(device_config_save_setup_passphrase(passphrase) == ESP_FAIL);
+    assert(device_config_load_setup_passphrase(loaded) == ESP_ERR_NOT_FOUND);
+    commit_result = ESP_OK;
+    assert(device_config_save_setup_passphrase(passphrase) == ESP_OK);
+    assert(device_config_init() == ESP_OK);
+    assert(device_config_load_setup_passphrase(loaded) == ESP_OK);
+    assert(strcmp(passphrase, loaded) == 0);
+    passphrase[0] = 'x';
+    assert(device_config_save_setup_passphrase(passphrase) == ESP_ERR_INVALID_ARG);
+    assert(device_config_load_setup_passphrase(loaded) == ESP_OK);
+    assert(loaded[0] == '0');
+}
+
 int main(void) {
+  test_setup_passphrase_is_committed_and_validated();
+  memset(records, 0, sizeof(records));
   test_legacy_wifi_and_named_configuration();
   test_saved_wifi_wins_over_bootstrap();
   test_empty_release_reuses_saved_wifi();
@@ -266,6 +373,8 @@ int main(void) {
   strcpy(p.ipv4, "192.168.1.9");
   assert(printer_config_valid(&p));
   test_bad_or_future_config_is_not_erased();
+  test_firebase_session_survives_rotation_failure();
+  test_pilot_confirmation_is_bound_to_the_image();
   puts("device configuration passed");
   return 0;
 }

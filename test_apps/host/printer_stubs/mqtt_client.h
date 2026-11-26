@@ -1,6 +1,5 @@
 #pragma once
 #include "esp_event.h"
-#include "esp_transport.h"
 #include <stdbool.h>
 struct esp_mqtt_client {
   int unused;
@@ -12,8 +11,7 @@ enum {
   MQTT_EVENT_DISCONNECTED,
   MQTT_EVENT_SUBSCRIBED,
   MQTT_EVENT_DATA,
-  MQTT_EVENT_ERROR,
-  MQTT_USER_EVENT
+  MQTT_EVENT_ERROR
 };
 typedef struct {
   struct {
@@ -23,6 +21,7 @@ typedef struct {
     } address;
     struct {
       const char *certificate, *common_name;
+      esp_err_t (*crt_bundle_attach)(void *);
       bool skip_cert_common_name_check;
     } verification;
   } broker;
@@ -39,7 +38,6 @@ typedef struct {
   struct {
     int timeout_ms;
     bool disable_auto_reconnect;
-    esp_transport_handle_t transport;
   } network;
   struct {
     int size, out_size;
@@ -48,17 +46,23 @@ typedef struct {
     int stack_size, priority;
   } task;
 } esp_mqtt_client_config_t;
+typedef enum {
+  MQTT_ERROR_TYPE_NONE = 0,
+  MQTT_ERROR_TYPE_SUBSCRIBE_FAILED = 3
+} esp_mqtt_error_type_t;
+typedef struct {
+  esp_mqtt_error_type_t error_type;
+} esp_mqtt_error_codes_t;
 typedef struct {
   int event_id, msg_id;
   esp_mqtt_client_handle_t client;
   char *topic, *data;
   int topic_len, data_len, current_data_offset, total_data_len;
   bool retain;
+  esp_mqtt_error_codes_t *error_handle;
   void *user_context;
 } esp_mqtt_event_t;
 typedef esp_mqtt_event_t *esp_mqtt_event_handle_t;
-esp_err_t esp_mqtt_dispatch_custom_event(esp_mqtt_client_handle_t,
-                                         esp_mqtt_event_t *);
 esp_mqtt_client_handle_t esp_mqtt_client_init(const esp_mqtt_client_config_t *);
 esp_err_t esp_mqtt_client_register_event(esp_mqtt_client_handle_t, int32_t,
                                          esp_event_handler_t, void *);

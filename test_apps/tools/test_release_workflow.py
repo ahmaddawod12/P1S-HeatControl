@@ -38,7 +38,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.git("commit", "-qm", "Prepare release")
         self.commit = self.git("rev-parse", "HEAD")
 
-    def run_policy(self, **overrides):
+    def run_policy(self, *flags, **overrides):
         arguments = {"root": str(self.root), "ref": "refs/heads/main",
                      "repository": "ahmaddawod12/P1S-HeatControl",
                      "commit": self.commit, "github-output": str(self.output)}
@@ -46,6 +46,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         command = [sys.executable, str(SCRIPT)]
         for key, value in arguments.items():
             command.extend([f"--{key}", value])
+        command.extend(flags)
         return subprocess.run(command, capture_output=True, text=True)
 
     def values(self):
@@ -62,7 +63,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         result = self.run_policy()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.values(), {"version": "1.0.1", "tag": "v1.0.1",
-                                        "commit": self.commit, "publish": "true"})
+                                        "commit": self.commit, "publish": "true", "build": "true"})
+
+    def test_staging_can_sign_an_existing_version_without_publishing(self):
+        self.git("tag", "v1.0.1")
+        self.git("tag", "v1.0.2")
+        result = self.run_policy("--stage-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.values(), {"version": "1.0.1", "tag": "v1.0.1",
+                                        "commit": self.commit, "publish": "false", "build": "true"})
 
     def test_existing_tag_is_a_successful_noop(self):
         for annotated in (False, True):
@@ -75,6 +84,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                     result = self.run_policy()
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(self.values()["publish"], "false")
+                    self.assertEqual(self.values()["build"], "false")
                     self.assertIn("already exists", result.stdout)
                 finally:
                     self.git("tag", "-d", "v1.0.1")

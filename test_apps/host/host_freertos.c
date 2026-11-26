@@ -13,9 +13,15 @@
 struct host_semaphore { pthread_mutex_t lock; pthread_cond_t changed; unsigned count; };
 struct host_queue { pthread_mutex_t lock; pthread_cond_t changed; unsigned capacity, size, count; unsigned char *data; };
 static atomic_bool pause_control_queue, control_queue_paused;
+static _Atomic(QueueHandle_t) paused_control_queue;
 static atomic_bool early_reply_timeout;
 void host_control_queue_pause(bool paused) { atomic_store(&pause_control_queue, paused); }
 bool host_control_queue_is_paused(void) { return atomic_load(&control_queue_paused); }
+bool host_control_queue_has_command(void)
+{
+    QueueHandle_t queue = atomic_load(&paused_control_queue);
+    return queue && uxQueueSpacesAvailable(queue) < queue->capacity;
+}
 void host_reply_queue_timeout_early(void) { atomic_store(&early_reply_timeout, true); }
 static struct timespec deadline(TickType_t ticks)
 {
@@ -35,6 +41,12 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void)
 }
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
 { SemaphoreHandle_t s = xSemaphoreCreateBinary(); if (s) s->count = 1; return s; }
+void vSemaphoreDelete(SemaphoreHandle_t s)
+{
+    pthread_cond_destroy(&s->changed);
+    pthread_mutex_destroy(&s->lock);
+    free(s);
+}
 SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *storage)
 {
     if (!storage->handle) storage->handle = xSemaphoreCreateMutex();
@@ -60,6 +72,13 @@ QueueHandle_t xQueueCreate(UBaseType_t capacity, UBaseType_t size)
     pthread_mutex_init(&q->lock, NULL); pthread_cond_init(&q->changed, NULL);
     q->capacity = capacity; q->size = size; return q;
 }
+void vQueueDelete(QueueHandle_t q)
+{
+    pthread_cond_destroy(&q->changed);
+    pthread_mutex_destroy(&q->lock);
+    free(q->data);
+    free(q);
+}
 BaseType_t xQueueSend(QueueHandle_t q, const void *item, TickType_t ticks)
 {
     const struct timespec until = deadline(ticks); pthread_mutex_lock(&q->lock);
@@ -73,9 +92,11 @@ static BaseType_t receive(QueueHandle_t q, void *item, TickType_t ticks, bool po
 {
     if (pop && q->capacity == 1 && atomic_exchange(&early_reply_timeout, false)) return pdFALSE;
     if (pop && q->capacity == 8 && atomic_load(&pause_control_queue)) {
+        atomic_store(&paused_control_queue, q);
         atomic_store(&control_queue_paused, true);
         while (atomic_load(&pause_control_queue)) Sleep(1);
         atomic_store(&control_queue_paused, false);
+        atomic_store(&paused_control_queue, NULL);
     }
     const struct timespec until = deadline(ticks); pthread_mutex_lock(&q->lock);
     while (!q->count) if (!ticks || wait(&q->changed, &q->lock, ticks, &until)) {
@@ -93,17 +114,56 @@ BaseType_t xQueueReset(QueueHandle_t q)
 { pthread_mutex_lock(&q->lock); q->count = 0; pthread_cond_broadcast(&q->changed); pthread_mutex_unlock(&q->lock); return pdTRUE; }
 UBaseType_t uxQueueSpacesAvailable(QueueHandle_t q)
 { pthread_mutex_lock(&q->lock); const unsigned n = q->capacity - q->count; pthread_mutex_unlock(&q->lock); return n; }
-typedef struct { void (*fn)(void *); void *arg; } task_t;
-static void *task_entry(void *p) { task_t task = *(task_t *) p; free(p); task.fn(task.arg); return NULL; }
+typedef struct { void (*fn)(void *); void *arg; SemaphoreHandle_t notification; } task_t;
+static _Thread_local task_t *current_task;
+static void task_cleanup(void *p)
+{
+    task_t *task = p;
+    vSemaphoreDelete(task->notification);
+    free(task);
+}
+static void *task_entry(void *p)
+{
+    current_task = p;
+    pthread_cleanup_push(task_cleanup, p);
+    current_task->fn(current_task->arg);
+    pthread_cleanup_pop(1);
+    return NULL;
+}
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack, void *arg, UBaseType_t priority, TaskHandle_t *out)
 {
     (void) name; (void) stack; (void) priority;
     pthread_t thread; task_t *task = malloc(sizeof(*task));
     if (!task) return pdFALSE;
-    *task = (task_t) {fn, arg};
+    *task = (task_t) {fn, arg, xSemaphoreCreateBinary()};
+    if (!task->notification) { free(task); return pdFALSE; }
     if (out) *out = task;
-    if (pthread_create(&thread, NULL, task_entry, task)) { free(task); if (out) *out = NULL; return pdFALSE; }
+    if (pthread_create(&thread, NULL, task_entry, task)) { task_cleanup(task); if (out) *out = NULL; return pdFALSE; }
     pthread_detach(thread); return pdPASS;
+}
+BaseType_t xTaskNotifyGive(TaskHandle_t handle)
+{
+    const task_t *task = handle;
+    SemaphoreHandle_t notification = task->notification;
+    pthread_mutex_lock(&notification->lock);
+    ++notification->count;
+    pthread_cond_signal(&notification->changed);
+    pthread_mutex_unlock(&notification->lock);
+    return pdTRUE;
+}
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks)
+{
+    SemaphoreHandle_t notification = current_task->notification;
+    const struct timespec until = deadline(ticks);
+    pthread_mutex_lock(&notification->lock);
+    while (!notification->count) if (!ticks || wait(&notification->changed, &notification->lock, ticks, &until)) {
+        pthread_mutex_unlock(&notification->lock);
+        return 0;
+    }
+    const uint32_t count = notification->count;
+    notification->count = clear ? 0 : count - 1;
+    pthread_mutex_unlock(&notification->lock);
+    return count;
 }
 #ifndef HOST_FREERTOS_NO_DELAY
 void vTaskDelay(TickType_t ticks) { Sleep(ticks); }

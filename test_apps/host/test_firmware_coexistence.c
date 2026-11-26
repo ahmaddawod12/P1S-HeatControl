@@ -3,7 +3,7 @@
 #include "../../components/firmware_update/firmware_update.c"
 static jmp_buf finished;
 static unsigned notifications,jobs,polls;
-static bool suspended,blocked,monitor_active;
+static bool suspended,blocked,monitor_active,heat_enabled;
 static uint64_t now;
 const firmware_identity_t custom_app_desc={.version="1.0.0"};
 int64_t esp_timer_get_time(void){return (int64_t)now*1000;}
@@ -18,6 +18,10 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t lock,TickType_t ticks){(void)ticks;a
 BaseType_t xSemaphoreGive(SemaphoreHandle_t lock){assert(lock);return pdTRUE;}
 bool firmware_trial_pending(void){return false;}
 bool app_runtime_maintenance_active(void){return false;}
+void app_runtime_get_status(app_status_t *status)
+{
+    *status = (app_status_t){.uptime_ms = now + 1, .enabled = heat_enabled};
+}
 bool app_runtime_monitor_active(void){assert(service_operation_current()==SERVICE_OPERATION_OTA);return monitor_active;}
 esp_err_t app_runtime_begin_maintenance(uint32_t t){(void)t;assert(0);return ESP_FAIL;}
 esp_err_t app_runtime_end_maintenance(void){assert(0);return ESP_FAIL;}
@@ -37,6 +41,10 @@ int main(void){
     assert(firmware_update_request()==ESP_ERR_NOT_ALLOWED);
     assert(!suspended && !atomic_load(&s_busy) && service_operation_current()==SERVICE_OPERATION_NONE);
     monitor_active=false;
+    heat_enabled = true;
+    assert(firmware_update_request() == ESP_ERR_NOT_ALLOWED);
+    assert(service_operation_current() == SERVICE_OPERATION_NONE);
+    heat_enabled = false;
     assert(service_operation_begin(SERVICE_OPERATION_PRINTER_CONFIG));assert(firmware_update_request()==ESP_ERR_NOT_ALLOWED);service_operation_end(SERVICE_OPERATION_PRINTER_CONFIG);
     run();assert(jobs==1 && now>=200);
     blocked=true;run();assert(jobs==1 && now>=5200 && s_status.result==FIRMWARE_RESULT_CHECK_FAILED);return 0;

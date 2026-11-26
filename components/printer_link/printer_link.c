@@ -7,6 +7,10 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+
+#define CONNECT_TIMEOUT_MS 30000U
+#define SUBSCRIBE_TIMEOUT_MS 15000U
+
 enum { EVENT_CONNECTED = 1, EVENT_SUBSCRIBED = 2 };
 typedef struct {
   uint32_t epoch;
@@ -31,9 +35,9 @@ static struct {
   SemaphoreHandle_t mailbox_lock;
   mailbox_t mailbox;
   uint32_t epoch, connections;
-  uint64_t retry_at, last_pushall;
+  uint64_t retry_at, attempt_deadline;
   unsigned backoff;
-  bool configured, attempting, connected, subscribed, pushall_sent;
+  bool configured, attempting, connected, subscribed;
 } s;
 static atomic_uint generation;
 static atomic_bool suspended, resources;
@@ -124,8 +128,7 @@ static void reset_status(void) {
   xSemaphoreGive(s.mailbox_lock);
 }
 esp_err_t printer_link_start_with_ops(const printer_link_ops_t *ops) {
-  if (!ops || !ops->connect || !ops->subscribe || !ops->publish ||
-      !ops->abort || !ops->now_ms)
+  if (!ops || !ops->connect || !ops->subscribe || !ops->abort)
     return ESP_ERR_INVALID_ARG;
   if (!s.events)
     s.events = xQueueCreate(4, sizeof(link_event_t));
@@ -136,10 +139,9 @@ esp_err_t printer_link_start_with_ops(const printer_link_ops_t *ops) {
   s.ops = *ops;
   s.epoch = atomic_fetch_add(&generation, 1) + 1;
   s.configured = s.attempting = s.connected = s.subscribed = false;
-  s.pushall_sent = false;
   s.connections = 0;
   s.backoff = 0;
-  s.retry_at = s.last_pushall = 0;
+  s.retry_at = 0;
   s.mailbox = (mailbox_t){0};
   memset(&s.status, 0, sizeof(s.status));
   atomic_store(&suspended, false);
@@ -161,7 +163,6 @@ esp_err_t printer_link_configure(const printer_connection_config_t *config) {
   s.backoff = 0;
   s.retry_at = 0;
   if (different) {
-    s.pushall_sent = false;
     xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
     s.mailbox.print_active = false;
     xSemaphoreGive(s.mailbox_lock);
@@ -220,6 +221,7 @@ void printer_link_tick(uint64_t now) {
     return;
   if (!s.attempting && now >= s.retry_at) {
     s.attempting = true;
+    s.attempt_deadline = now + CONNECT_TIMEOUT_MS;
     atomic_store(&resources, true);
     if (s.ops.connect(&s.config, s.ops.ctx) != ESP_OK) {
       printer_link_invalidate(s.epoch);
@@ -234,32 +236,23 @@ void printer_link_tick(uint64_t now) {
       char topic[64];
       snprintf(topic, sizeof(topic), "device/%s/report", s.config.serial);
       s.connected = true;
-      s.backoff = 0;
+      s.attempt_deadline = now + SUBSCRIBE_TIMEOUT_MS;
       ++s.connections;
       reset_status();
       if (s.ops.subscribe(topic, s.ops.ctx) != ESP_OK)
         printer_link_invalidate(s.epoch);
     } else if (e.type == EVENT_SUBSCRIBED && s.connected) {
       s.subscribed = true;
+      s.backoff = 0;
     }
   }
+  if (s.attempting && !s.subscribed && now >= s.attempt_deadline)
+    printer_link_invalidate(s.epoch);
   take_mailbox();
   xSemaphoreTake(s.mailbox_lock, portMAX_DELAY);
   s.status.connected =
       s.connected && s.subscribed && !printer_link_cancelled(s.epoch);
-  const bool needs_recovery = s.status.connected && !s.status.state_known;
   xSemaphoreGive(s.mailbox_lock);
-  if (needs_recovery &&
-      (!s.pushall_sent || now - s.last_pushall >= PRINTER_PUSHALL_MIN_INTERVAL_MS)) {
-    char topic[64];
-    snprintf(topic, sizeof(topic), "device/%s/request", s.config.serial);
-    const char json[] = "{\"pushing\":{\"sequence_id\":\"0\",\"command\":"
-                        "\"pushall\",\"version\":1,\"push_target\":1}}";
-    /* Count the attempt itself: a failed write must not make retries flood. */
-    s.pushall_sent = true;
-    s.last_pushall = now;
-    (void)s.ops.publish(topic, json, sizeof(json) - 1, now + 1000, s.ops.ctx);
-  }
 }
 void printer_link_get_status(printer_link_status_t *out) {
   if (!out)

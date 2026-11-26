@@ -47,78 +47,41 @@ static void assert_write(size_t index, int gpio_num, int level)
     TEST_ASSERT_EQUAL_INT(level, s_log.level[index]);
 }
 
-TEST_CASE("initialization drives both channels inactive first", "[board]")
+TEST_CASE("initialization drives the shared relay inactive first", "[board]")
 {
     TEST_ESP_OK(init_fake(true));
-
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
-    assert_write(0, GPIO_NUM_16, 1);
-    assert_write(1, GPIO_NUM_17, 1);
-    TEST_ASSERT_EQUAL_INT(s_log.level[0], s_log.level[1]);
-}
-
-TEST_CASE("activation commands the fan before the heater", "[board]")
-{
-    TEST_ESP_OK(init_fake(true));
-    clear_log();
-
-    TEST_ESP_OK(board_outputs_set(true, true));
-
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
-    assert_write(0, GPIO_NUM_17, 0);
-    assert_write(1, GPIO_NUM_16, 0);
-    TEST_ASSERT_EQUAL_INT(s_log.level[0], s_log.level[1]);
-}
-
-TEST_CASE("deactivation commands the heater before the fan", "[board]")
-{
-    TEST_ESP_OK(init_fake(true));
-    TEST_ESP_OK(board_outputs_set(true, true));
-    clear_log();
-
-    TEST_ESP_OK(board_outputs_set(false, false));
-
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
-    assert_write(0, GPIO_NUM_16, 1);
-    assert_write(1, GPIO_NUM_17, 1);
-    TEST_ASSERT_EQUAL_INT(s_log.level[0], s_log.level[1]);
-}
-
-TEST_CASE("the fan can remain on after the heater turns off", "[board]")
-{
-    TEST_ESP_OK(init_fake(true));
-    TEST_ESP_OK(board_outputs_set(true, true));
-    clear_log();
-
-    TEST_ESP_OK(board_outputs_set(false, true));
 
     TEST_ASSERT_EQUAL_UINT32(1, s_log.count);
     assert_write(0, GPIO_NUM_16, 1);
 }
 
-TEST_CASE("the heater cannot run without the fan", "[board]")
+TEST_CASE("activation and deactivation write only GPIO16", "[board]")
 {
     TEST_ESP_OK(init_fake(true));
     clear_log();
 
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, board_outputs_set(true, false));
-    TEST_ASSERT_EQUAL_UINT32(0, s_log.count);
+    TEST_ESP_OK(board_outputs_set(true));
+    TEST_ESP_OK(board_outputs_set(false));
+
+    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
+    assert_write(0, GPIO_NUM_16, 0);
+    assert_write(1, GPIO_NUM_16, 1);
 }
 
-TEST_CASE("repeating a logical state does not toggle relays", "[board]")
+TEST_CASE("repeating a logical state does not toggle the relay", "[board]")
 {
     TEST_ESP_OK(init_fake(true));
-    TEST_ESP_OK(board_outputs_set(true, true));
+    TEST_ESP_OK(board_outputs_set(true));
     clear_log();
 
-    TEST_ESP_OK(board_outputs_set(true, true));
+    TEST_ESP_OK(board_outputs_set(true));
     TEST_ASSERT_EQUAL_UINT32(0, s_log.count);
 
-    TEST_ESP_OK(board_outputs_set(false, false));
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
+    TEST_ESP_OK(board_outputs_set(false));
+    TEST_ASSERT_EQUAL_UINT32(1, s_log.count);
     clear_log();
 
-    TEST_ESP_OK(board_outputs_set(false, false));
+    TEST_ESP_OK(board_outputs_set(false));
     TEST_ASSERT_EQUAL_UINT32(0, s_log.count);
 }
 
@@ -126,27 +89,24 @@ TEST_CASE("active-high boards invert the electrical mapping", "[board]")
 {
     TEST_ESP_OK(init_fake(false));
 
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
+    TEST_ASSERT_EQUAL_UINT32(1, s_log.count);
     assert_write(0, GPIO_NUM_16, 0);
-    assert_write(1, GPIO_NUM_17, 0);
     clear_log();
 
-    TEST_ESP_OK(board_outputs_set(true, true));
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
-    assert_write(0, GPIO_NUM_17, 1);
-    assert_write(1, GPIO_NUM_16, 1);
+    TEST_ESP_OK(board_outputs_set(true));
+    TEST_ASSERT_EQUAL_UINT32(1, s_log.count);
+    assert_write(0, GPIO_NUM_16, 1);
 }
 
-TEST_CASE("forcing off rewrites both channels even when already off", "[board]")
+TEST_CASE("forcing off rewrites the relay even when already off", "[board]")
 {
     TEST_ESP_OK(init_fake(true));
     clear_log();
 
     TEST_ESP_OK(board_outputs_force_off());
 
-    TEST_ASSERT_EQUAL_UINT32(2, s_log.count);
+    TEST_ASSERT_EQUAL_UINT32(1, s_log.count);
     assert_write(0, GPIO_NUM_16, 1);
-    assert_write(1, GPIO_NUM_17, 1);
 }
 
 TEST_CASE("commands before initialization are rejected", "[board]")
@@ -155,7 +115,7 @@ TEST_CASE("commands before initialization are rejected", "[board]")
     TEST_ESP_OK(board_outputs_deinit());
     clear_log();
 
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, board_outputs_set(true, true));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, board_outputs_set(true));
     TEST_ASSERT_EQUAL_UINT32(0, s_log.count);
 
     TEST_ESP_OK(init_fake(true));

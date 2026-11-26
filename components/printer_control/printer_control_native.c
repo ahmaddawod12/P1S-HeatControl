@@ -7,21 +7,26 @@ static void heat(app_status_t *out, void *c) {
   (void)c;
   app_runtime_get_status(out);
 }
-static esp_err_t begin(uint64_t until, void *c) {
+static esp_err_t begin(printer_monitor_phase_t phase, uint64_t until, uint64_t deadline, void *c) {
   (void)c;
-  return app_runtime_monitor_begin(until);
+  return app_runtime_monitor_begin_until(phase, until, deadline);
 }
-static esp_err_t permit(uint64_t until, void *c) {
+static esp_err_t permit(printer_monitor_phase_t phase, uint64_t until, void *c) {
   (void)c;
-  return app_runtime_monitor_permit(until);
+  return app_runtime_monitor_permit(phase, until);
 }
-static void end_monitor(bool disable, void *c) {
+static esp_err_t suspend_recovery(void *c) {
   (void)c;
-  app_runtime_monitor_end(disable);
+  return app_runtime_monitor_suspend_recovery();
 }
-static bool monitor_active(void *c) {
+static esp_err_t end_monitor(bool disable, uint64_t deadline,
+    const app_runtime_enable_guard_t *guard, uint32_t revision, void *c) {
   (void)c;
-  return app_runtime_monitor_active();
+  return app_runtime_monitor_end_until(disable, deadline, guard, revision);
+}
+static printer_monitor_phase_t monitor_phase(void *c) {
+  (void)c;
+  return app_runtime_monitor_phase();
 }
 static esp_err_t configure(const printer_connection_config_t *v, void *c) {
   (void)c;
@@ -69,8 +74,9 @@ esp_err_t printer_control_start(void) {
   const printer_control_ops_t ops = {.heat_snapshot = heat,
                                      .monitor_begin = begin,
                                      .monitor_permit = permit,
+                                     .monitor_suspend_recovery = suspend_recovery,
                                      .monitor_end = end_monitor,
-                                     .monitor_active = monitor_active,
+                                     .monitor_phase = monitor_phase,
                                      .link_configure = configure,
                                      .link_tick = tick,
                                      .link_status = link_status,

@@ -9,4 +9,6 @@ esp_err_t firmware_trial_start(void);
 bool firmware_trial_pending(void);
 void firmware_trial_startup_progress(void);
 void firmware_trial_startup_complete(esp_err_t result);
+/* The Firebase worker reports its enrollment read result after startup. */
+void firmware_trial_note_cloud_storage_ready(bool ready);
 void firmware_update_note_boot_result(firmware_result_t result);

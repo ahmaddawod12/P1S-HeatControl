@@ -10,7 +10,9 @@
 
 #define SETTINGS_NAMESPACE "heat_cfg"
 #define SETTINGS_KEY "settings"
-#define HEATING_ENABLED_KEY "heat_enabled"
+#define HEAT_MODE_KEY "heat_enabled"
+/* A separate key keeps the target and calibration record readable after rollback. */
+#define HYSTERESIS_KEY "hysteresis"
 
 _Static_assert(sizeof(settings_data_t) == 12,
                "settings_data_t layout is part of the NVS schema");
@@ -179,29 +181,65 @@ esp_err_t settings_set_calibration(float calibration_offset_c)
     return update(calibration_offset_c, false);
 }
 
-esp_err_t settings_load_heating_enabled(bool *enabled)
+esp_err_t settings_load_hysteresis(float *hysteresis_c)
 {
-    *enabled = false;
+    if (hysteresis_c == NULL) return ESP_ERR_INVALID_ARG;
+    *hysteresis_c = HEAT_DEFAULT_HYSTERESIS_C;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+
+    uint8_t half_degrees;
+    err = nvs_get_u8(handle, HYSTERESIS_KEY, &half_degrees);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    if (err != ESP_OK) return err;
+    const float value = half_degrees * 0.5f;
+    if (!heat_hysteresis_is_valid(value)) return ESP_ERR_INVALID_STATE;
+    *hysteresis_c = value;
+    return ESP_OK;
+}
+
+esp_err_t settings_set_hysteresis(float hysteresis_c)
+{
+    if (!heat_hysteresis_is_valid(hysteresis_c)) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, HYSTERESIS_KEY, (uint8_t) (hysteresis_c * 2.0f));
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    return err;
+}
+
+esp_err_t settings_load_heat_mode(heat_mode_t *mode)
+{
+    if (mode == NULL) return ESP_ERR_INVALID_ARG;
+    *mode = HEAT_MODE_OFF;
     nvs_handle_t handle;
     esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
 
     uint8_t value = 0;
-    err = nvs_get_u8(handle, HEATING_ENABLED_KEY, &value);
+    err = nvs_get_u8(handle, HEAT_MODE_KEY, &value);
     nvs_close(handle);
     if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
     if (err != ESP_OK) return err;
-    if (value > 1) return ESP_ERR_INVALID_STATE;
-    *enabled = value == 1;
+    if (value > HEAT_MODE_LOCKOUT) return ESP_ERR_INVALID_STATE;
+    *mode = (heat_mode_t) value;
     return ESP_OK;
 }
 
-esp_err_t settings_save_heating_enabled(bool enabled)
+esp_err_t settings_save_heat_mode(heat_mode_t mode)
 {
+    if ((unsigned) mode > HEAT_MODE_LOCKOUT) {
+        return ESP_ERR_INVALID_ARG;
+    }
     nvs_handle_t handle;
     esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle);
     if (err == ESP_OK) {
-        err = nvs_set_u8(handle, HEATING_ENABLED_KEY, enabled);
+        err = nvs_set_u8(handle, HEAT_MODE_KEY, (uint8_t) mode);
         if (err == ESP_OK) err = nvs_commit(handle);
         nvs_close(handle);
     }
